@@ -44,6 +44,8 @@ pub enum RxEvent {
     Sync { mode: Mode, call: String, cfo_hz: f32 },
     /// A ping.
     Ping { call: String, cfo_hz: f32 },
+    /// A sync symbol whose preamble could not be decoded.
+    PreambleFailed,
     /// A payload is complete and being decoded.
     Decoding { mode: Mode, call: String },
     /// A payload could not be decoded.
@@ -304,7 +306,10 @@ fn handle(ev: Event, dec: &mut Decoder, source: &Source, events: &Sender<RxEvent
         let _ = events.send(RxEvent::Log(format!("{t} {s}")));
     };
     match ev {
-        Event::PreambleFailed => log("sync found, preamble not decodable".into()),
+        Event::PreambleFailed => {
+            log("sync found, preamble not decodable".into());
+            let _ = events.send(RxEvent::PreambleFailed);
+        }
         Event::Unsupported { mode, call, cfo_hz } => {
             log(format!("{call:>9}  mode {mode} not supported ({cfo_hz:.1} Hz)"));
         }

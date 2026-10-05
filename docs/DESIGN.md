@@ -88,14 +88,42 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
 - Live test (2026-10-05): CLI transmitter into VB-Audio cable A, CLI receiver on its
   output: text and picture received intact.
 
+## GUI (`apps/cofdmtv-gui`)
+
+DecDRM's structure and look, reusing its pieces (panel helpers, LEDs, meter, log, ring
+image, waterfall model, font fallbacks, settings store, screenshot automation):
+
+- Top bar: COFDMtv · Receiver ▶ · Transmitter ▶ (a marker while running) · theme · Log.
+- Receiver: source bar (sound card or recording, channel, real time, Start/Stop, save
+  folder) → status strip (LEDs Input / Sync / Decode, state, mode, sender, carrier, SNR,
+  symbol progress; level, position, counts) → plot tabs Overview / Spectrum / Waterfall /
+  Constellation with a span choice (4 kHz, 8 kHz, full band; the waterfall keeps 6.25 Hz
+  bins so the fancy header's call sign reads) → side panel: the latest or chosen picture,
+  its facts and Open/Folder, a multi-frame progress card, the gallery or the messages.
+- Transmitter: cards Station (call sign, checked live), Send (Picture with original and
+  "as it will arrive" previews, format, size, frames + extra, send-as-is; Text with a
+  byte counter and the mode it takes; Ping), Signal (mode, carrier within the range the
+  mode allows, lead-in, fancy header, carriers above 3 kHz), Output (sound card or file,
+  rate, channels, level); status side: Transmission (state, the big Transmit/Stop button
+  with the reason it is off, frame k of n, progress), Output (meter, destination, rates),
+  Output spectrum, Sent.
+- Pictures are prepared on a thread whenever an input changes; drag and drop: recordings
+  to the receiver, pictures to the transmitter. `--start`, `--transmit`, `--page`,
+  `--no-audio`, `--config`, `--screenshot`, `--exit-after`, `--window-size` as in DecDRM.
+- Default save folder `Pictures\COFDMtv` (Assempix saves to Pictures). Test runs must use
+  `--config` with a `save_dir` under `out/` so nothing lands in the user's Pictures.
+- Live GUI test (2026-10-05): GUI receiving from VB-Audio cable A while the CLI sent a
+  text and a picture: both received, fancy headers legible; GUI `--transmit` of a
+  three-frame picture to a file rebuilt by COFDMtv and by the Assempix logic.
+
 ## Milestones
 
 - [x] M0 — project, C++ reference harness, cross-check scripts.
 - [x] M1 — COFDMTV core: pictures, text, ping, multi-frame; cross-checked, fixtures.
 - [x] M2 — audio I/O (sound cards, WAV), engine (worker threads), pictures, CLI.
-- [ ] M3 — GUI receiver page (DecDRM look): sources, LED strip, spectrum, waterfall,
+- [x] M3 — GUI receiver page (DecDRM look): sources, LED strip, spectrum, waterfall,
       constellation, received pictures/text, log.
-- [ ] M4 — GUI transmitter page: picture preparation (resize, JPEG/PNG/WebP fitted to the
+- [x] M4 — GUI transmitter page: picture preparation (resize, JPEG/PNG/WebP fitted to the
       payload), multi-frame, text, ping; sound card or WAV.
 - [ ] M5 — aicodix modem datagrams: core, CLI, GUI.
 - [ ] M6 — GitHub repository, CI, README with screenshots, portable executables.

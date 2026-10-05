@@ -58,13 +58,15 @@ static void crs_payload(CauchyReedSolomonErasureCoding &crsec, const uint8_t *pa
 	long got = crsec.recover(data.data(), bytes, idents.size());
 	if (got != current_crc) {
 		std::cout << "CRS corrupted" << std::endl;
+		// The app forgets the picture only when it is corrupted; after a success further
+		// frames of it are "redundant".
+		current_count = current_bytes = 0;
+		current_crc = 0;
 	} else {
 		std::string name = prefix + "_crs.bin";
 		write_file(name, data.data(), data.size());
 		std::cout << "CRS complete bytes=" << bytes << " -> " << name << std::endl;
 	}
-	current_count = current_bytes = 0;
-	current_crc = 0;
 }
 
 template <int RATE>

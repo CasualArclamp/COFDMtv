@@ -1,0 +1,273 @@
+//! The GUI's view of the receiving engine.
+//!
+//! The engine runs on its own threads and owns all receiver state; the GUI polls a copy
+//! of its latest snapshot each frame, plus the events (transmissions, pictures, texts,
+//! log lines) and waterfall rows that arrived since (see `cofdmtv_engine::receiver`). What
+//! the displays derive from them — the waterfall history, the received pictures with
+//! their textures, the message list, the indicator states — lives here.
+
+use crate::waterfall::{Waterfall, crop};
+use chrono::{DateTime, Local};
+use cofdmtv_engine::cofdmtv_core::cofdmtv::Mode;
+use cofdmtv_engine::payload::{Picture, TextMessage};
+use cofdmtv_engine::{Receiver, RxConfig, RxEvent, RxSnapshot};
+use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
+use std::collections::VecDeque;
+use std::time::Instant;
+
+/// Log lines kept.
+pub const LOG_CAPACITY: usize = 5000;
+/// Pictures kept in memory (the saved files stay on disk).
+pub const PICTURES_KEPT: usize = 200;
+
+/// Bounded list of log lines.
+#[derive(Debug, Clone, Default)]
+pub struct LogBuffer {
+    lines: VecDeque<String>,
+}
+
+impl LogBuffer {
+    pub fn push(&mut self, line: impl Into<String>) {
+        self.lines.push_back(line.into());
+        while self.lines.len() > LOG_CAPACITY {
+            self.lines.pop_front();
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn get(&self, i: usize) -> Option<&str> {
+        self.lines.get(i).map(String::as_str)
+    }
+
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+
+    /// All lines joined with newlines (for the clipboard).
+    pub fn text(&self) -> String {
+        self.lines.iter().map(String::as_str).collect::<Vec<_>>().join("\n")
+    }
+}
+
+/// A received picture and its texture (made when first shown).
+pub struct ShownPicture {
+    pub picture: Picture,
+    pub size: Option<(u32, u32)>,
+    texture: Option<Result<TextureHandle, String>>,
+}
+
+impl ShownPicture {
+    fn new(picture: Picture) -> Self {
+        let size = cofdmtv_pix::dimensions(&picture.data);
+        Self { picture, size, texture: None }
+    }
+
+    /// The texture, decoding the picture the first time.
+    pub fn texture(&mut self, ctx: &egui::Context, id: usize) -> Result<&TextureHandle, &str> {
+        if self.texture.is_none() {
+            self.texture = Some(match cofdmtv_pix::decode(&self.picture.data) {
+                Some(rgba) => {
+                    let size = [rgba.width() as usize, rgba.height() as usize];
+                    let image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                    Ok(ctx.load_texture(format!("picture-{id}"), image, TextureOptions::LINEAR))
+                }
+                None => Err(match self.picture.kind {
+                    Some(k) => format!("{} pictures cannot be shown here (saved as received)", k.name()),
+                    None => "not a picture COFDMtv knows".to_string(),
+                }),
+            });
+        }
+        match self.texture.as_ref().expect("set above") {
+            Ok(t) => Ok(t),
+            Err(e) => Err(e.as_str()),
+        }
+    }
+}
+
+/// A line of the message list.
+#[derive(Debug, Clone)]
+pub enum Message {
+    Text(TextMessage),
+    Ping { time: DateTime<Local>, call: String, cfo_hz: f32 },
+}
+
+/// The frames of a multi-frame picture in hand.
+#[derive(Debug, Clone)]
+pub struct MultiFrame {
+    pub call: String,
+    pub have: usize,
+    pub need: usize,
+    pub size: usize,
+}
+
+/// How the last transmission ended, for the indicators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Decoded,
+    Failed,
+}
+
+/// Engine handle plus everything the GUI derives from it.
+#[derive(Default)]
+pub struct RxSession {
+    engine: Option<Receiver>,
+    stopping: bool,
+    /// What is being received (file or device name), for the title and the log.
+    pub label: String,
+    pub snap: RxSnapshot,
+    pub waterfall: Waterfall,
+    pub log: LogBuffer,
+    /// Newest last.
+    pub pictures: Vec<ShownPicture>,
+    /// The picture shown large (index into `pictures`); `None`: the newest.
+    pub selected: Option<usize>,
+    pub messages: Vec<Message>,
+    pub multiframe: Option<MultiFrame>,
+    /// The band of the transmission being received or last received (carrier and
+    /// bandwidth, Hz), and when it ended.
+    pub band: Option<(f32, f32)>,
+    pub band_ended: Option<Instant>,
+    /// A sync whose preamble failed, recently.
+    pub preamble_failed: Option<Instant>,
+    pub outcome: Option<(Outcome, Instant)>,
+    /// Non-ASCII text received since the application last took it (fonts).
+    pub text_seen: String,
+    /// Pictures and messages that arrived since the application last looked (for a
+    /// repaint / attention).
+    pub fresh: bool,
+    started: Option<Instant>,
+}
+
+impl RxSession {
+    pub fn is_running(&self) -> bool {
+        self.engine.is_some()
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping
+    }
+
+    pub fn start(&mut self, cfg: RxConfig, label: String) {
+        self.stop_now();
+        self.log.push(format!("— start: {label}"));
+        self.label = label;
+        self.snap = RxSnapshot::default();
+        self.waterfall.clear();
+        self.multiframe = None;
+        self.band = None;
+        self.outcome = None;
+        self.preamble_failed = None;
+        self.started = Some(Instant::now());
+        self.engine = Some(Receiver::start(cfg));
+    }
+
+    /// Ask the engine to stop; it reports when it has.
+    pub fn stop(&mut self) {
+        if let Some(e) = &self.engine {
+            e.stop();
+            self.stopping = true;
+        }
+    }
+
+    /// Stop and wait (at exit).
+    pub fn stop_now(&mut self) {
+        if let Some(mut e) = self.engine.take() {
+            e.stop();
+            e.join();
+            for ev in e.poll_events() {
+                self.handle(ev);
+            }
+        }
+        self.stopping = false;
+    }
+
+    /// Take what the engine has published; `span` is the frequency range shown (Hz).
+    pub fn poll(&mut self, span_of: impl Fn(u32, bool) -> (f64, f64)) {
+        let Some(engine) = &mut self.engine else { return };
+        if let Some(s) = engine.snapshot_if_newer() {
+            self.snap = s;
+        }
+        let rows = engine.take_rows();
+        let events = engine.poll_events();
+        let rate = self.snap.source.processing_rate;
+        if rate > 0 {
+            let span = span_of(rate, self.snap.iq);
+            for row in rows {
+                let (part, covered) = crop(&row, self.snap.spectrum_axis, span);
+                self.waterfall.push(part, covered, self.snap.row_s);
+            }
+        }
+        for ev in events {
+            self.handle(ev);
+        }
+    }
+
+    fn handle(&mut self, ev: RxEvent) {
+        match ev {
+            RxEvent::Log(line) => self.log.push(line),
+            RxEvent::Sync { mode, cfo_hz, .. } => {
+                self.band = Some((cfo_hz, band_width(mode)));
+                self.band_ended = None;
+            }
+            RxEvent::Ping { call, cfo_hz } => {
+                self.note(&call);
+                self.messages.push(Message::Ping { time: Local::now(), call, cfo_hz });
+                self.fresh = true;
+            }
+            RxEvent::PreambleFailed => self.preamble_failed = Some(Instant::now()),
+            RxEvent::Decoding { .. } => self.band_ended = Some(Instant::now()),
+            RxEvent::DecodeFailed { .. } => self.outcome = Some((Outcome::Failed, Instant::now())),
+            RxEvent::Picture(p) => {
+                self.outcome = Some((Outcome::Decoded, Instant::now()));
+                self.note(&p.call);
+                if p.frames > 1 {
+                    self.multiframe = None;
+                }
+                self.pictures.push(ShownPicture::new(p));
+                if self.pictures.len() > PICTURES_KEPT {
+                    self.pictures.remove(0);
+                    self.selected = self.selected.and_then(|s| s.checked_sub(1));
+                }
+                self.selected = None;
+                self.fresh = true;
+            }
+            RxEvent::Text(m) => {
+                self.outcome = Some((Outcome::Decoded, Instant::now()));
+                self.note(&m.text);
+                self.note(&m.call);
+                self.messages.push(Message::Text(m));
+                self.fresh = true;
+            }
+            RxEvent::MultiFrame { call, have, need, size } => {
+                self.outcome = Some((Outcome::Decoded, Instant::now()));
+                self.multiframe = Some(MultiFrame { call, have, need, size });
+            }
+            RxEvent::EndOfInput => {}
+            RxEvent::Error(e) => self.log.push(format!("error: {e}")),
+            RxEvent::Stopped => {
+                if let Some(mut e) = self.engine.take() {
+                    e.join();
+                }
+                self.stopping = false;
+                self.snap.running = false;
+                self.snap.receiving = None;
+                self.snap.decoding = false;
+                self.log.push("— stopped");
+            }
+        }
+    }
+
+    fn note(&mut self, text: &str) {
+        if !text.is_ascii() {
+            self.text_seen.push_str(text);
+        }
+    }
+}
+
+/// Width of a mode's signal, Hz (its carriers × 6.25 Hz).
+pub fn band_width(mode: Mode) -> f32 {
+    mode.carriers() as f32 * 6.25
+}
