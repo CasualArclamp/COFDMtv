@@ -1,0 +1,67 @@
+# Build and test on every push to main and every pull request, and on demand (Actions →
+# CI → Run workflow, or `gh workflow run ci.yml`).
+#
+# - test (Linux, Windows): the workspace's tests (loopback at every rate, signals made by
+#   the original aicodix programs in tests/fixtures), clippy, and scripts/smoke-test.sh
+#   (the CLI transmits and receives, the GUI decodes a file headless).
+#
+# Not here: the cross-checks against the original C++ (scripts/xcheck.sh,
+# scripts/sensitivity.sh) need the aicodix repositories and a C++ compiler, and the live
+# tests need virtual audio cables; both run locally. The repository is private, so the
+# runners' minutes count: one job per system.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: System packages (ALSA headers for cpal; Xvfb and Mesa for the GUI)
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libasound2-dev pkg-config xvfb xauth libgl1-mesa-dri libegl1 libxkbcommon-x11-0
+      - name: Mesa (software OpenGL for the GUI; the runners have no GPU)
+        if: runner.os == 'Windows'
+        uses: ssciwr/setup-mesa-dist-win@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --release --all-targets
+      - name: Test
+        run: cargo test --workspace --release
+      - name: Clippy
+        run: cargo clippy --workspace --release --all-targets -- -D clippy::correctness
+      - name: Smoke test
+        shell: bash
+        run: scripts/smoke-test.sh target/release "$RUNNER_TEMP/smoke"
+      - name: Smoke test output (receiver logs, pictures, GUI screenshot)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-${{ runner.os }}
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: warn
