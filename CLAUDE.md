@@ -35,6 +35,9 @@ datagrams, transmit and receive, in Rust, with DecDRM's look (`F:\DRM`). Read
   `… -- devices`.
 - GUI test runs: `--config` with a `save_dir` under `out/`, `--no-audio`, `--start` /
   `--transmit`, `--exit-after N --screenshot out/….png`.
+- Portable exes: `powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1`
+  (static CRT, into `exe\`). Releases: a pushed tag `vX.Y.Z` runs `release.yml`, which
+  drafts the release; publishing (`gh release edit … --draft=false`) is the user's call.
 - Live tests through VB-Audio cable A (allowed, silent): `tx … --device "CABLE-A Input"`
   while `rx --device "CABLE-A Output" --duration N` runs.
 - Python edits on Windows: write with `newline='\n'`; the Bash tool collapses `\\` in

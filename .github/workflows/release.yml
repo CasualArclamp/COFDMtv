@@ -1,0 +1,117 @@
+# Portable Windows release of a tag. Pushing a tag v* (or Actions → Release → Run
+# workflow with an existing tag) builds cofdmtv-gui.exe and cofdmtv.exe as
+# scripts/build-portable.ps1 does (static C runtime), checks that their versions match
+# the tag and that they need no C runtime DLL, runs scripts/smoke-test.sh on them, and
+# uploads them with their SHA-256 to a draft release of the tag. Then write the release
+# notes and publish it:
+#
+#   gh release edit vX.Y.Z --title "…" --notes-file notes.md --draft=false --latest
+#
+# A release that is already published is never touched: the job fails instead. A trial
+# run without a release: `gh workflow run release.yml -f tag=main -f upload=false`.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (vX.Y.Z), or a branch for a trial run without upload
+        required: true
+      upload:
+        description: Upload the executables to a draft release of the tag
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows portable
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - name: Mesa (software OpenGL for the GUI smoke test; the runners have no GPU)
+        uses: ssciwr/setup-mesa-dist-win@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build (static C runtime)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --target x86_64-pc-windows-msvc -p cofdmtv-gui -p cofdmtv-cli
+      - name: Check (versions, no C runtime DLL, smoke test)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=target/x86_64-pc-windows-msvc/release
+          "$bin/cofdmtv" --version
+          if [[ $TAG == v* ]]; then
+            test "$("$bin/cofdmtv" --version)" = "cofdmtv ${TAG#v}"
+            test "$("$bin/cofdmtv-gui" --version)" = "cofdmtv-gui ${TAG#v}"
+          fi
+          for exe in cofdmtv cofdmtv-gui; do
+            if grep -a -q -i -e vcruntime140 -e api-ms-win-crt "$bin/$exe.exe"; then
+              echo "$exe.exe imports a C runtime DLL: not a static build" >&2
+              exit 1
+            fi
+          done
+          bash scripts/smoke-test.sh "$bin" "$RUNNER_TEMP/smoke"
+      - name: Smoke test output (receiver logs, pictures, GUI screenshot)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-release
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: warn
+      - name: Draft release
+        if: github.event_name == 'push' || inputs.upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bin=target/x86_64-pc-windows-msvc/release
+          cp "$bin/cofdmtv-gui.exe" "$bin/cofdmtv.exe" .
+          cat > notes.md <<'EOF'
+          Portable Windows executables for 64-bit Windows 10/11, nothing to install (static C runtime).
+
+          | File | What |
+          |---|---|
+          | `cofdmtv-gui.exe` | Desktop app: receiver (sound card or recording) and transmitter for COFDMTV pictures (Shredpix/Assempix), text (Rattlegram), pings and aicodix modem datagrams |
+          | `cofdmtv.exe` | Command line: `cofdmtv rx`, `cofdmtv tx picture\|text\|ping\|data`, `cofdmtv devices` |
+
+          Windows SmartScreen may warn on first start because the files are unsigned ("More info" → "Run anyway").
+          EOF
+          {
+            echo
+            echo "Built from $(git rev-parse --short HEAD) by [GitHub Actions]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+            echo
+            echo "SHA-256:"
+            echo '```'
+            # (Git Bash's sha256sum marks binary mode with a star: "hash *file".)
+            sha256sum cofdmtv-gui.exe cofdmtv.exe | sed 's/ \*/  /'
+            echo '```'
+          } >> notes.md
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
+            if [ "$draft" != true ]; then
+              echo "release $TAG is already published: not replacing its files" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" cofdmtv-gui.exe cofdmtv.exe --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --draft --verify-tag --title "COFDMtv ${TAG#v} (Windows portable)" \
+              --notes-file notes.md cofdmtv-gui.exe cofdmtv.exe
+          fi
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"

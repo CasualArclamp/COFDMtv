@@ -76,6 +76,11 @@ cargo build --release
 gives `target/release/cofdmtv-gui` and `target/release/cofdmtv`. On Linux, cpal needs the
 ALSA headers (`libasound2-dev` and `pkg-config` on Debian and Ubuntu).
 
+Single-file Windows executables that need nothing installed (static C runtime):
+`powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` writes them to
+`exe\`. Pushing a tag `vX.Y.Z` has GitHub Actions build them the same way, smoke-test
+them and attach them to a draft release (`.github/workflows/release.yml`).
+
 Tests: `cargo test --release --workspace` (loopback of every mode at every rate, signals
 made by the originals in `tests/fixtures`, the engines end to end), and
 `scripts/smoke-test.sh target/release OUT_DIR` (the CLI and the GUI end to end, as CI runs
