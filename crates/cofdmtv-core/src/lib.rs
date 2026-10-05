@@ -1,6 +1,7 @@
 //! COFDMtv core: pure-Rust ports of the aicodix audio modems.
 //!
 //! * [`cofdmtv`] — COFDMTV: pictures (Shredpix/Assempix), text (Rattlegram) and pings.
+//! * [`modem`] — the aicodix modem: datagrams in BPSK…QAM4096 frames.
 //! * [`coding`] — CRCs, sequences, BCH and ordered-statistics decoding, polar codes with
 //!   CRC-aided list decoding, PSK, Cauchy Reed–Solomon erasure coding, call signs.
 //! * [`dsp`] — FFTs, filters, oscillator, sliding buffers, Theil–Sen, PAPR reduction.
@@ -11,3 +12,4 @@
 pub mod coding;
 pub mod cofdmtv;
 pub mod dsp;
+pub mod modem;

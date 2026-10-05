@@ -345,6 +345,18 @@ impl<const L: usize> CaScl<L> {
         Self { decoder: PolarListDecoder::new(max_level), message: vec![[0.0; L]; n], code: vec![0.0; n], bits: vec![0; n] }
     }
 
+    /// List-decode a plain (non-systematic) polar code of length `1 << level`, as the
+    /// modem uses: the information bits are the message. Returns their number; then
+    /// [`Self::message_bit`] reads path `k`'s bits (path 0 ranked first).
+    pub fn decode_plain(&mut self, llr: &[f32], frozen: &[u32], level: u32) -> usize {
+        self.decoder.decode(&mut self.message, llr, frozen, level)
+    }
+
+    /// Information bit `i` of list path `path` after [`Self::decode_plain`].
+    pub fn message_bit(&self, i: usize, path: usize) -> bool {
+        self.message[i][path] < 0.0
+    }
+
     /// Decode the received LLRs `received` (`code.sent_bits()` of them). `None` when no
     /// list path passes the CRC.
     pub fn decode(&mut self, received: &[f32], code: &ShortCode) -> Option<Decoded> {

@@ -10,6 +10,10 @@
 //!     CHANNEL: 0 mono, 1 first, 2 second, 3 sum, 4 analytic (I/Q)
 //! wavcodec split INPUT FRAMES OUTPREFIX
 //!     multi-frame (CRS) payloads OUTPREFIX_0.bin … of a file
+//! wavcodec modem-encode OUT.wav RATE BITS CHANNELS OFFSET CALLSIGN MODULATION CODERATE FRAMESIZE INPUT...
+//!     the aicodix modem, arguments as its `encode` takes them
+//! wavcodec modem-decode IN.wav OUTPREFIX
+//!     the aicodix modem: datagrams to OUTPREFIX_1.bin, …
 //! ```
 
 use cofdmtv_core::cofdmtv::multiframe::{self, Progress, Reassembler};
@@ -168,12 +172,119 @@ fn split(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn modem_encode(args: &[String]) -> Result<(), String> {
+    use cofdmtv_core::modem::{CodeRate, ModemEncoder, ModemMode, ModemRequest, Modulation};
+    let [out, rate, bits, channels, offset, call, modulation, code_rate, frame_size, inputs @ ..] = args else {
+        return Err("modem-encode OUT.wav RATE BITS CHANNELS OFFSET CALLSIGN MODULATION CODERATE FRAMESIZE INPUT...".into());
+    };
+    let num = |s: &String| s.parse::<i64>().map_err(|e| format!("{s}: {e}"));
+    let rate = num(rate)? as u32;
+    let channels = num(channels)? as u16;
+    let modulation = Modulation::ALL.into_iter().find(|m| m.name() == modulation).ok_or(format!("modulation {modulation}"))?;
+    let code_rate = CodeRate::ALL.into_iter().find(|r| r.name() == code_rate).ok_or(format!("code rate {code_rate}"))?;
+    let normal = match frame_size.as_str() {
+        "short" => false,
+        "normal" => true,
+        f => return Err(format!("frame size {f}")),
+    };
+    let mode = ModemMode { modulation, rate: code_rate, normal };
+    let frames = inputs
+        .iter()
+        .map(|f| std::fs::read(f).map(|mut d| {
+            d.resize(mode.data_bytes(), 0);
+            d
+        }).map_err(|e| format!("{f}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut enc = ModemEncoder::new(rate).ok_or(format!("unsupported rate {rate}"))?;
+    enc.configure(&ModemRequest { mode, call_sign: call.clone(), carrier_hz: num(offset)? as i32, frames })?;
+    let float = num(bits)? == 32;
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate: rate,
+        bits_per_sample: if float { 32 } else { 16 },
+        sample_format: if float { hound::SampleFormat::Float } else { hound::SampleFormat::Int },
+    };
+    let mut w = hound::WavWriter::create(out, spec).map_err(|e| e.to_string())?;
+    let mut write = |z: Cplx| -> Result<(), String> {
+        for (i, v) in [z.re, z.im].into_iter().enumerate().take(usize::from(channels)) {
+            let _ = i;
+            if float {
+                w.write_sample(v).map_err(|e| e.to_string())?;
+            } else {
+                w.write_sample((32767.0 * v).round_ties_even().clamp(-32768.0, 32767.0) as i16).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    };
+    for _ in 0..rate {
+        write(Cplx::new(0.0, 0.0))?;
+    }
+    while let Some(chunk) = enc.next_chunk() {
+        for &z in chunk.to_vec().iter() {
+            write(z)?;
+        }
+    }
+    for _ in 0..rate {
+        write(Cplx::new(0.0, 0.0))?;
+    }
+    w.finalize().map_err(|e| e.to_string())?;
+    let papr = &enc.papr_db;
+    if !papr.is_empty() {
+        let mut p = papr.clone();
+        p.sort_by(f32::total_cmp);
+        eprintln!("{}: PAPR {:.1} .. {:.1} .. {:.1} dB", mode.label(), p[0], p[p.len() / 2], p[p.len() - 1]);
+    }
+    Ok(())
+}
+
+fn modem_decode(args: &[String]) -> Result<(), String> {
+    use cofdmtv_core::modem::{ModemDecoder, ModemEvent, decode_datagram};
+    let [input, prefix] = args else {
+        return Err("modem-decode IN.wav OUTPREFIX".into());
+    };
+    let mut r = hound::WavReader::open(input).map_err(|e| format!("{input}: {e}"))?;
+    let spec = r.spec();
+    let channels = spec.channels as usize;
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => r.samples::<i32>().map(|s| s.map(|v| v as f32 / (1u32 << (spec.bits_per_sample - 1)) as f32)).collect::<Result<_, _>>(),
+        hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>(),
+    }
+    .map_err(|e| e.to_string())?;
+    let mut dec = ModemDecoder::new(spec.sample_rate).ok_or(format!("unsupported rate {}", spec.sample_rate))?;
+    let mut decoder = None;
+    let mut n = 0;
+    for frame in samples.chunks_exact(channels) {
+        let ev = if channels == 1 { dec.push_real(frame[0]) } else { dec.push(Cplx::new(frame[0], frame[1])) };
+        match ev {
+            Some(ModemEvent::Sync { mode, call, cfo_hz }) => println!("SYNC cfo={cfo_hz:.1} mode={} call={call}", mode.label()),
+            Some(ModemEvent::MetaFailed) => println!("META failed"),
+            Some(ModemEvent::Lost) => println!("LOST"),
+            Some(ModemEvent::Done) => {
+                let cw = dec.take_codeword().expect("codeword");
+                match decode_datagram(&cw, &mut decoder) {
+                    Some(d) => {
+                        n += 1;
+                        let name = format!("{prefix}_{n}.bin");
+                        std::fs::write(&name, &d.data).map_err(|e| format!("{name}: {e}"))?;
+                        println!("DONE Es/N0={:.1}..{:.1}..{:.1}dB -> {name}", d.snr_db.0, d.snr_db.1, d.snr_db.2);
+                    }
+                    None => println!("DONE failed"),
+                }
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("encode") => encode(&args[1..]),
         Some("decode") => decode(&args[1..]),
         Some("split") => split(&args[1..]),
+        Some("modem-encode") => modem_encode(&args[1..]),
+        Some("modem-decode") => modem_decode(&args[1..]),
         _ => Err("usage: wavcodec encode … | wavcodec decode …".into()),
     };
     match result {

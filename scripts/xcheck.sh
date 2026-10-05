@@ -64,5 +64,34 @@ check "cofdmtv I/Q->assempix" "$("$ref/assempix_decode" "$tmp/iq2.wav" "$tmp/iq2
 "$rs" encode "$tmp/r2.wav" 16000 12 DL1ABC 1700 2 1 2 "$tmp/p.bin" 2>/dev/null
 check "cofdmtv right channel->assempix" "$("$ref/assempix_decode" "$tmp/r2.wav" "$tmp/r2" 2)" "DONE flips=0"
 
+# The aicodix modem: every modulation, code rate and frame size, both ways, two frames
+# each; the rate and the channels (mono, I/Q) vary with the mode.
+n=0
+for modulation in BPSK QPSK 8PSK QAM16 QAM64 QAM256 QAM1024 QAM4096; do
+	for code_rate in 1/2 2/3 3/4 5/6; do
+		for frame_size in short normal; do
+			n=$((n + 1))
+			rate=$((n % 2 ? 48000 : 44100))
+			chans=$((n % 3 ? 1 : 2))
+			head -c 7000 /dev/urandom >"$tmp/m1.dat"
+			head -c 100 /dev/urandom >"$tmp/m2.dat"
+			label="$modulation $code_rate $frame_size $rate Hz ${chans}ch"
+			"$ref/modem_encode" "$tmp/me.wav" $rate 16 $chans 1500 DL1ABC $modulation $code_rate $frame_size "$tmp/m1.dat" "$tmp/m2.dat" 2>/dev/null
+			rm -f "$tmp"/mr_*.bin
+			out="$("$rs" modem-decode "$tmp/me.wav" "$tmp/mr")"
+			check "modem->cofdmtv $label" "$out" "DONE Es/N0"
+			bytes=$(stat -c %s "$tmp/mr_1.bin" 2>/dev/null || echo 0)
+			cmp -s <(head -c "$bytes" "$tmp/m1.dat") "$tmp/mr_1.bin" || { fail=$((fail + 1)); echo "FAIL payload modem->cofdmtv $label"; }
+			cmp -s <(head -c 100 "$tmp/mr_2.bin") "$tmp/m2.dat" || { fail=$((fail + 1)); echo "FAIL second frame modem->cofdmtv $label"; }
+			"$rs" modem-encode "$tmp/mf.wav" $rate 16 $chans 1500 DL1ABC $modulation $code_rate $frame_size "$tmp/m1.dat" "$tmp/m2.dat" 2>/dev/null
+			rm -f "$tmp"/mo1 "$tmp"/mo2
+			out="$("$ref/modem_decode" "$tmp/mf.wav" "$tmp/mo1" "$tmp/mo2" 2>&1)"
+			check "cofdmtv->modem $label" "$out" "Es/N0"
+			cmp -s "$tmp/mo1" "$tmp/mr_1.bin" || { fail=$((fail + 1)); echo "FAIL payload cofdmtv->modem $label"; }
+			cmp -s <(head -c 100 "$tmp/mo2") "$tmp/m2.dat" || { fail=$((fail + 1)); echo "FAIL second frame cofdmtv->modem $label"; }
+		done
+	done
+done
+
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

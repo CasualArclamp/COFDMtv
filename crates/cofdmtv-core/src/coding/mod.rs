@@ -6,14 +6,17 @@
 //! the header it came from.
 
 pub mod base37;
+pub mod base40;
 pub mod bch;
 pub mod bits;
 pub mod crc;
 pub mod crs;
+pub mod hadamard;
 pub mod mls;
 pub mod osd;
 pub mod polar;
 pub mod psk;
+pub mod qam;
 pub mod tables;
 pub mod xorshift;
 

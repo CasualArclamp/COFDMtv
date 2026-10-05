@@ -1,21 +1,41 @@
-//! Synchronisation on the COFDMTV sync symbol (Assempix/Rattlegram `schmidl_cox.hh`).
+//! Schmidl & Cox synchronisation (Assempix/Rattlegram and aicodix/modem
+//! `schmidl_cox.hh`).
 //!
-//! The sync symbol repeats after half a symbol, so the Schmidl & Cox timing metric
-//! |P|²/R² peaks there; its phase gives the fractional frequency offset. Once the metric
-//! falls again, the half symbol is transformed, demodulated differentially between
-//! neighbouring carriers and cross-correlated (via FFT) with the known sequence: the peak
-//! gives the integer frequency offset — the carrier frequency, as the receiver looks at
-//! the whole audio band — and its phase the remaining timing error.
+//! The sync symbol repeats after `len` samples (half a COFDMTV symbol; two whole modem
+//! symbols back to back), so the timing metric |P|²/R² peaks there; its phase gives the
+//! fractional frequency offset. Once the metric falls again, `len` samples are
+//! transformed, demodulated differentially between neighbouring bins and
+//! cross-correlated (via FFT) with the known sequence: the peak gives the integer
+//! frequency offset — the carrier frequency, as the receiver looks at the whole audio
+//! band — and its phase the remaining timing error.
 
-use crate::coding::mls::Mls;
-use crate::coding::nrz;
 use crate::dsp::{Cplx, Delay, FallingEdge, Fft, Phasor, SchmittTrigger, SlidingSum, demod_or_erase};
 use std::f32::consts::{PI, TAU};
 
+/// What differs between the COFDMTV and the modem synchroniser.
+#[derive(Debug, Clone, Copy)]
+pub struct SyncParams {
+    /// Schmitt trigger thresholds of the timing metric, per sample of the matched sum.
+    pub low: f64,
+    pub high: f64,
+    /// Smallest power of the denominator, per sample of `len`.
+    pub min_r: f64,
+    /// Erase differential pairs whose bins are below the mean power (the modem).
+    pub erase_weak: bool,
+    /// Largest timing error accepted, in guard intervals.
+    pub max_pos_err: f32,
+}
+
+impl SyncParams {
+    pub const COFDMTV: SyncParams = SyncParams { low: 0.17, high: 0.19, min_r: 0.0001, erase_weak: false, max_pos_err: 0.5 };
+    pub const MODEM: SyncParams = SyncParams { low: 0.07, high: 0.09, min_r: 0.00001, erase_weak: true, max_pos_err: 1.0 };
+}
+
 pub struct SchmidlCox {
     search_pos: usize,
-    /// Half a symbol: the period of the sync symbol and the size of the FFTs here.
+    /// The period of the sync symbol and the size of the FFTs here.
     half: usize,
+    params: SyncParams,
     guard_len: usize,
     match_del: usize,
     fft: Fft,
@@ -38,19 +58,14 @@ pub struct SchmidlCox {
 }
 
 impl SchmidlCox {
-    /// A correlator looking at windows of the receive buffer from `search_pos`, for
-    /// symbols of `2 * half` samples with `guard_len` samples of guard interval.
-    pub fn new(search_pos: usize, half: usize, guard_len: usize) -> Self {
+    /// A correlator looking at windows of the receive buffer from `search_pos`, for a
+    /// sync symbol repeating after `half` samples, with `guard_len` samples of guard
+    /// interval; `sequence` is what its differential demodulation yields in each bin.
+    pub fn new(search_pos: usize, half: usize, guard_len: usize, sequence: Vec<Cplx>, params: SyncParams) -> Self {
+        assert_eq!(sequence.len(), half);
         let match_len = guard_len | 1;
         let match_del = (match_len - 1) / 2;
-        // The sequence as the half-size FFT sees it (every other carrier of the symbol).
-        let mut seq = Mls::new(super::COR_SEQ_POLY);
-        let mut kern = vec![Cplx::new(0.0, 0.0); half];
-        let off = super::COR_SEQ_OFF / 2;
-        for i in 0..super::COR_SEQ_LEN {
-            let k = (i + off + half as i32).rem_euclid(half as i32) as usize;
-            kern[k] = Cplx::new(nrz(seq.next()), 0.0);
-        }
+        let mut kern = sequence;
         let mut fft = Fft::new(half);
         fft.forward(&mut kern);
         for k in &mut kern {
@@ -59,6 +74,7 @@ impl SchmidlCox {
         Self {
             search_pos,
             half,
+            params,
             guard_len,
             match_del,
             fft,
@@ -66,7 +82,7 @@ impl SchmidlCox {
             pwr: SlidingSum::new(2 * half),
             matched: SlidingSum::new(match_len),
             delay: Delay::new(match_del),
-            threshold: SchmittTrigger::new(0.17 * match_len as f32, 0.19 * match_len as f32),
+            threshold: SchmittTrigger::new((params.low * match_len as f64) as f32, (params.high * match_len as f64) as f32),
             falling: FallingEdge::default(),
             tmp0: vec![Cplx::new(0.0, 0.0); half],
             tmp1: vec![Cplx::new(0.0, 0.0); half],
@@ -84,7 +100,7 @@ impl SchmidlCox {
     pub fn process(&mut self, samples: &[Cplx]) -> bool {
         let (sp, half) = (self.search_pos, self.half);
         let p = self.cor.push(samples[sp + half] * samples[sp + 2 * half].conj());
-        let min_r = (0.0001 * half as f64) as f32;
+        let min_r = (self.params.min_r * half as f64) as f32;
         let r = (0.5 * self.pwr.push(samples[sp + 2 * half].norm_sqr())).max(min_r);
         let timing = self.matched.push(p.norm_sqr() / (r * r));
         let phase = self.delay.push(p.im.atan2(p.re));
@@ -116,8 +132,20 @@ impl SchmidlCox {
         }
         self.tmp0.copy_from_slice(&self.tmp1);
         self.fft.forward(&mut self.tmp0);
+        let floor = if self.params.erase_weak { self.tmp0.iter().map(|c| c.norm_sqr()).sum::<f32>() / half as f32 } else { 0.0 };
         for i in 0..half {
-            self.tmp1[i] = demod_or_erase(self.tmp0[i], self.tmp0[(i + half - 1) % half]);
+            let (curr, prev) = (self.tmp0[i], self.tmp0[(i + half - 1) % half]);
+            self.tmp1[i] = if self.params.erase_weak {
+                // The modem: both bins above the mean power, quotient below 2.
+                if curr.norm_sqr() > floor && prev.norm_sqr() > floor {
+                    let c = super::div(curr, prev);
+                    if c.norm_sqr() < 4.0 { c } else { Cplx::new(0.0, 0.0) }
+                } else {
+                    Cplx::new(0.0, 0.0)
+                }
+            } else {
+                demod_or_erase(curr, prev)
+            };
         }
         self.tmp0.copy_from_slice(&self.tmp1);
         self.fft.forward(&mut self.tmp0);
@@ -142,7 +170,9 @@ impl SchmidlCox {
         }
         let t = self.tmp0[shift];
         let pos_err = (t.im.atan2(t.re) * half as f32 / TAU).round_ties_even() as i32;
-        if pos_err.unsigned_abs() as usize > self.guard_len / 2 {
+        // COFDMTV allows half a guard interval (integer division), the modem a whole one.
+        let limit = if self.params.max_pos_err < 1.0 { self.guard_len / 2 } else { self.guard_len };
+        if pos_err.unsigned_abs() as usize > limit {
             return false;
         }
         self.symbol_pos = (symbol_pos as i32 - pos_err) as usize;

@@ -15,7 +15,7 @@
 //! caller may want on another thread while the receiver listens on.
 
 use super::meta::{Meta, MetaDecoder, MetaError};
-use super::sync::SchmidlCox;
+use crate::dsp::schmidl_cox::{SchmidlCox, SyncParams};
 use super::{Layout, Mode};
 use crate::coding::base37;
 use crate::coding::polar::CaScl;
@@ -150,7 +150,7 @@ impl Decoder {
         Some(Self {
             layout,
             fft: Fft::new(n),
-            correlator: SchmidlCox::new(search_pos, n / 2, layout.guard_len),
+            correlator: SchmidlCox::new(search_pos, n / 2, layout.guard_len, super::sync_sequence(n / 2), SyncParams::COFDMTV),
             block_dc: BlockDc::new(filter_len),
             hilbert: Hilbert::new(filter_len),
             buffer: BipBuffer::new(4 * layout.extended_len),

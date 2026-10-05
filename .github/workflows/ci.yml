@@ -57,7 +57,7 @@ jobs:
         run: cargo clippy --workspace --release --all-targets -- -D clippy::correctness
       - name: Smoke test
         shell: bash
-        run: scripts/smoke-test.sh target/release "$RUNNER_TEMP/smoke"
+        run: bash scripts/smoke-test.sh target/release "$RUNNER_TEMP/smoke"
       - name: Smoke test output (receiver logs, pictures, GUI screenshot)
         if: always()
         uses: actions/upload-artifact@v7

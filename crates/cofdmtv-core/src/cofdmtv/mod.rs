@@ -26,7 +26,6 @@ mod decoder;
 mod encoder;
 pub mod meta;
 pub mod multiframe;
-mod sync;
 
 pub use decoder::{Codeword, Decoder, Event, IMAGE_LIST, Payload, PolarDecoders, TEXT_LIST, decode_codeword};
 pub use encoder::{Encoder, TxRequest};
@@ -240,6 +239,18 @@ impl Layout {
     pub fn bin(&self, carrier: i32) -> usize {
         carrier.rem_euclid(self.symbol_len as i32) as usize
     }
+}
+
+/// The sync symbol's sequence as an FFT of half a symbol (`half` bins) sees it after
+/// differential demodulation: one value per bin, every other carrier of the symbol.
+pub(crate) fn sync_sequence(half: usize) -> Vec<crate::dsp::Cplx> {
+    let mut seq = crate::coding::mls::Mls::new(COR_SEQ_POLY);
+    let mut out = vec![crate::dsp::Cplx::new(0.0, 0.0); half];
+    for i in 0..COR_SEQ_LEN {
+        let k = (i + COR_SEQ_OFF / 2 + half as i32).rem_euclid(half as i32) as usize;
+        out[k] = crate::dsp::Cplx::new(crate::coding::nrz(seq.next()), 0.0);
+    }
+    out
 }
 
 /// Sequences and offsets of the sync symbol and the preamble.

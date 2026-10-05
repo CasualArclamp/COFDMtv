@@ -7,6 +7,7 @@
 mod fft;
 mod filters;
 mod papr;
+pub mod schmidl_cox;
 mod theil_sen;
 mod window;
 
