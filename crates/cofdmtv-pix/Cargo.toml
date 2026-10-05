@@ -1,0 +1,15 @@
+[package]
+name = "cofdmtv-pix"
+description = "Pictures for COFDMTV: loading, scaling and compressing to fit a payload, and decoding received ones"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Decoders for the pictures to send (and the received JPEG/PNG/WebP), the JPEG and PNG
+# encoders, and scaling.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif", "tiff"] }
+# Lossy and lossless WebP encoding (libwebp, compiled from vendored sources with cc).
+webp = { version = "0.3.1", default-features = false }

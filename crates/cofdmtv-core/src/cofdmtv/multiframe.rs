@@ -165,10 +165,14 @@ impl Reassembler {
             file.extend_from_slice(&data[i * SLOT..i * SLOT + n]);
         }
         let mut crc = Crc32::new(POLY_DATA);
-        let ok = crc.bytes(&file) == h.crc;
-        self.current = None;
-        self.idents.clear();
-        if ok { Progress::Complete(file) } else { Progress::Corrupted }
+        if crc.bytes(&file) == h.crc {
+            // Kept, as in Assempix: more frames of this file are redundant.
+            Progress::Complete(file)
+        } else {
+            self.current = None;
+            self.idents.clear();
+            Progress::Corrupted
+        }
     }
 }
 
@@ -183,18 +187,17 @@ mod tests {
         for size in [1, 5366, 5367, 20000, MAX_BYTES] {
             let file: Vec<u8> = (0..size).map(|_| rng.next() as u8).collect();
             let blocks = blocks_for(size);
-            let frames = split(&file, blocks + 2).unwrap();
+            let frames = split(&file, blocks + 3).unwrap();
             assert!(frames.iter().all(|f| f.len() == IMAGE_BYTES));
             // Lose the first two frames.
             let mut r = Reassembler::default();
             let mut last = Progress::NotMultiFrame;
-            for f in &frames[2..] {
+            for f in &frames[2..2 + blocks] {
                 last = r.push(f);
             }
             assert_eq!(last, Progress::Complete(file.clone()), "size {size}");
-            // A completed file starts afresh: a late frame begins a new collection.
-            let expected = if blocks == 1 { Progress::Complete(file) } else { Progress::Partial { have: 1, need: blocks } };
-            assert_eq!(r.push(&frames[0]), expected);
+            // Frames of a completed file are redundant (Assempix's "chunk_redundant").
+            assert_eq!(r.push(&frames[0]), Progress::Redundant);
         }
     }
 
@@ -206,6 +209,7 @@ mod tests {
         assert_eq!(r.push(&frames[0]), Progress::Partial { have: 1, need: 2 });
         assert_eq!(r.push(&frames[0]), Progress::Duplicate);
         assert_eq!(r.push(&frames[2]), Progress::Complete(file));
+        assert_eq!(r.push(&frames[1]), Progress::Redundant);
         assert!(split(&vec![0; MAX_BYTES + 1], 13).is_err());
         assert!(split(&[1, 2, 3], 0).is_err());
         assert_eq!(r.push(&[0u8; IMAGE_BYTES]), Progress::NotMultiFrame);

@@ -1,0 +1,17 @@
+[package]
+name = "cofdmtv-engine"
+description = "COFDMtv receiver and transmitter engines: sources, sinks, worker threads, snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cofdmtv-core = { path = "../cofdmtv-core" }
+cofdmtv-io = { path = "../cofdmtv-io" }
+# Local time for the names of saved pictures (as Assempix names them).
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+tempfile = "3"

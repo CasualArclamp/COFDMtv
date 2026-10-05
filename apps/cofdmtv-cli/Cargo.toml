@@ -1,0 +1,20 @@
+[package]
+name = "cofdmtv-cli"
+description = "COFDMtv command-line transmitter and receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cofdmtv"
+path = "src/main.rs"
+
+[dependencies]
+cofdmtv-engine = { path = "../../crates/cofdmtv-engine" }
+cofdmtv-pix = { path = "../../crates/cofdmtv-pix" }
+anyhow.workspace = true
+clap = { version = "4.6", features = ["derive"] }
+# Ctrl+C stops the receiver or transmitter cleanly (saving what arrived).
+ctrlc = "3.5"
