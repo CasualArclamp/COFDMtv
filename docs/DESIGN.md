@@ -63,10 +63,24 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
 - `tools/cxx-reference/build.sh` builds the original programs (Shredpix encoder, Assempix
   decoder with its CRS bookkeeping, Rattlegram codec, the CRS chunk tool, the modem) with
   MSYS2's g++ from clones in `reference/` (git-ignored).
-- `scripts/xcheck.sh`: 216 checks, both directions (originals → COFDMtv, COFDMtv →
-  originals): COFDMTV at five rates, picture modes 6/9/10/13, three text lengths, pings,
-  I/Q and stereo; the modem's 64 modes (eight modulations, four code rates, short and
-  normal frames) at 44.1 and 48 kHz, with identical Es/N0 to the original decoder. Multi-frame checked both ways by hand (2026-10-05): COFDMtv frames rebuild in the
+- `scripts/xcheck.sh`: 347 checks. Decoding both directions (originals → COFDMtv,
+  COFDMtv → originals): COFDMTV at five rates, picture modes 6/9/10/13, three text
+  lengths, pings, I/Q and stereo; the modem's 64 modes (eight modulations, four code
+  rates, short and normal frames) at 44.1 and 48 kHz, with identical Es/N0 to the
+  original decoder. Waveforms sample by sample: COFDMtv's COFDMTV signals equal the apps'
+  within 1 LSB (rounding) for every picture mode, the three text modes and both pings at
+  every rate, and the I/Q and one-channel layouts; the modem's too, except now and then
+  one symbol whose PAPR scrambling differs (the encoders keep the first of 128 candidates
+  below a PAPR of 5, else the lowest; a candidate within rounding of the threshold or of
+  another goes either way, and the C++ is built with `-ffast-math`) — the scrambling's
+  number travels on the pilots, so both decode alike, which the payload comparisons check.
+- The apps' noise lead-in draws each carrier as `cmplx(nrz(noise_seq()), nrz(noise_seq()))`;
+  C++ leaves the order of the two calls open, and the apps' compiler (Clang, Android NDK)
+  draws I first, g++ Q first. COFDMtv draws I first; `build.sh` also builds copies of the
+  two encoders that do (`*_ltr`) for the waveform comparison.
+- Found by the waveform comparison (2026-10-05) and fixed: text was clipped like
+  Shredpix clips (the larger of |re| and |im|) instead of like Rattlegram (the
+  magnitude). Decoding had not minded either way. Multi-frame checked both ways by hand (2026-10-05): COFDMtv frames rebuild in the
   Assempix logic and vice versa, with a frame missing; CRS chunks are byte-identical to
   aicodix/crs.
 - `scripts/sensitivity.sh`: identical impaired signals (aicodix/disorders: 23.5 Hz CFO,
@@ -106,6 +120,12 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
   "redundant", as in Assempix); a frame of another file starts afresh.
 - Received pictures are trimmed of the payload's zero padding by format (WebP by its RIFF
   size, AVIF by its boxes, JPEG/PNG by the trailing zeros) before saving.
+- Rattlegram clips every text symbol at about its RMS level in a time domain oversampled
+  to about 32 kHz: more power on the air for a radio's amplifier, at the price of in-band
+  distortion. The SNR a perfect text signal shows is therefore about 30 dB at 8 kHz,
+  17 dB at 16 kHz and 11 dB at 32–48 kHz — in Rattlegram as in COFDMtv (measured with an
+  SNR-printing build of Rattlegram's decoder); the polar code makes up for it. COFDMtv
+  sends what Rattlegram sends.
 - Live test (2026-10-05): CLI transmitter into VB-Audio cable A, CLI receiver on its
   output: text and picture received intact. Modem (same day): a QAM16 text, a 10594-byte JPEG in
   five QAM64 3/4 normal frames built at 44.1 kHz, then a Rattlegram text, into one

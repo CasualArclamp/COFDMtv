@@ -14,6 +14,13 @@
 //!     the aicodix modem, arguments as its `encode` takes them
 //! wavcodec modem-decode IN.wav OUTPREFIX
 //!     the aicodix modem: datagrams to OUTPREFIX_1.bin, …
+//! wavcodec compare A.wav B.wav [SYMBOL]
+//!     SAME if two 16-bit WAV files have the same format and length and their samples
+//!     differ by at most 1 (rounding), else DIFF and where. With SYMBOL (samples of a
+//!     symbol, all channels), differences confined to single symbols are "SAME except N
+//!     symbols": the modem's encoders pick the scrambling with the lowest PAPR, and where
+//!     two candidates (or one and the threshold) are within rounding of each other, the
+//!     original (built with -ffast-math) and COFDMtv may pick differently.
 //! ```
 
 use cofdmtv_core::cofdmtv::multiframe::{self, Progress, Reassembler};
@@ -277,6 +284,51 @@ fn modem_decode(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn compare(args: &[String]) -> Result<(), String> {
+    let (a, b, symbol) = match args {
+        [a, b] => (a, b, None),
+        [a, b, s] => (a, b, Some(s.parse::<usize>().map_err(|e| format!("{s}: {e}"))?)),
+        _ => return Err("compare A.wav B.wav [SYMBOL]".into()),
+    };
+    let read = |path: &String| -> Result<(hound::WavSpec, Vec<i32>), String> {
+        let mut r = hound::WavReader::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let spec = r.spec();
+        let samples = r.samples::<i32>().collect::<Result<Vec<_>, _>>().map_err(|e| format!("{path}: {e}"))?;
+        Ok((spec, samples))
+    };
+    let ((sa, a), (sb, b)) = (read(a)?, read(b)?);
+    if sa != sb || a.len() != b.len() {
+        println!("DIFF format or length: {sa:?} {} samples, {sb:?} {} samples", a.len(), b.len());
+        return Ok(());
+    }
+    let (at, max) = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).enumerate().max_by_key(|&(_, d)| d).unwrap_or((0, 0));
+    let off = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+    if max <= 1 {
+        println!("SAME max_diff={max} differing={off} of {}", a.len());
+        return Ok(());
+    }
+    if let Some(symbol) = symbol {
+        // Runs of differences beyond rounding, split where a quarter symbol is alike.
+        let big: Vec<usize> = a.iter().zip(&b).enumerate().filter(|(_, (x, y))| (*x - *y).abs() > 1).map(|(i, _)| i).collect();
+        let mut runs = vec![(big[0], big[0])];
+        for &i in &big[1..] {
+            let last = runs.last_mut().expect("one run at least");
+            if i - last.1 > symbol / 4 {
+                runs.push((i, i));
+            } else {
+                last.1 = i;
+            }
+        }
+        if runs.iter().all(|(s, e)| e - s < symbol + symbol / 8) {
+            let at: Vec<String> = runs.iter().map(|(s, _)| s.to_string()).collect();
+            println!("SAME except {} symbol{} (at sample {})", runs.len(), if runs.len() == 1 { "" } else { "s" }, at.join(", "));
+            return Ok(());
+        }
+    }
+    println!("DIFF max_diff={max} at sample {at} (of {}), {off} differing", a.len());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -285,6 +337,7 @@ fn main() -> ExitCode {
         Some("split") => split(&args[1..]),
         Some("modem-encode") => modem_encode(&args[1..]),
         Some("modem-decode") => modem_decode(&args[1..]),
+        Some("compare") => compare(&args[1..]),
         _ => Err("usage: wavcodec encode … | wavcodec decode …".into()),
     };
     match result {

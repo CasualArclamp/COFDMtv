@@ -19,7 +19,7 @@ use crate::coding::mls::Mls;
 use crate::coding::tables::BASE37_BITMAP;
 use crate::coding::xorshift::Xorshift32;
 use crate::coding::{base37, nrz};
-use crate::dsp::{Cplx, Fft, improve_papr};
+use crate::dsp::{Clip, Cplx, Fft, improve_papr};
 
 /// What to send.
 #[derive(Debug, Clone)]
@@ -291,7 +291,9 @@ impl Encoder {
         if let Some((fact, fft)) = &mut self.papr
             && (papr || self.text)
         {
-            improve_papr(&mut self.freq, *fact, fft);
+            // Rattlegram holds the magnitude to the clipping level, Shredpix I and Q.
+            let clip = if self.text { Clip::Magnitude } else { Clip::Components };
+            improve_papr(&mut self.freq, *fact, fft, clip);
         }
         self.temp.copy_from_slice(&self.freq);
         self.fft.backward(&mut self.temp);

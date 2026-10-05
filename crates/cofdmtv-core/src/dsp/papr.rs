@@ -3,10 +3,21 @@
 
 use super::{Cplx, Fft};
 
+/// What is held to the clipping level: the apps differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clip {
+    /// The larger of |re| and |im| (Shredpix).
+    Components,
+    /// The magnitude (Rattlegram).
+    Magnitude,
+}
+
 /// Clip the OFDM symbol whose carriers are `freq` (length `n`) and project back onto the
 /// carriers in use, with `fact`-times oversampling (`fft` must have size `fact * n`).
-/// Samples are clipped where the larger of |re| and |im| exceeds the RMS level.
-pub fn improve_papr(freq: &mut [Cplx], fact: usize, fft: &mut Fft) {
+/// Samples are clipped where they exceed 1 after scaling by 1/√(`fact`·`n`): for the
+/// symbols the encoders make, at about their RMS level (at 32 kHz and up, where `fact`
+/// is 1; lower rates are oversampled to about 32 kHz first, which softens the clipping).
+pub fn improve_papr(freq: &mut [Cplx], fact: usize, fft: &mut Fft, clip: Clip) {
     let n = freq.len();
     let size = fact * n;
     debug_assert_eq!(fft.len(), size);
@@ -22,7 +33,10 @@ pub fn improve_papr(freq: &mut [Cplx], fact: usize, fft: &mut Fft) {
     let factor = 1.0 / (size as f32).sqrt();
     for t in &mut over {
         *t *= factor;
-        let amp = t.re.abs().max(t.im.abs());
+        let amp = match clip {
+            Clip::Components => t.re.abs().max(t.im.abs()),
+            Clip::Magnitude => t.norm(),
+        };
         if amp > 1.0 {
             *t /= amp;
         }

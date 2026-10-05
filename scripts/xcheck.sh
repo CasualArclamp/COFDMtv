@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Cross-checks COFDMtv against the original aicodix programs, both ways: signals from the
-# originals must decode in COFDMtv and COFDMtv's signals in the originals. Needs the
-# reference programs (tools/cxx-reference/build.sh); runs locally only.
+# originals must decode in COFDMtv and COFDMtv's signals in the originals, and the
+# encoders' waveforms must equal the originals' sample by sample (within 1 LSB). Needs
+# the reference programs (tools/cxx-reference/build.sh); runs locally only.
 #
 # usage: scripts/xcheck.sh
 set -uo pipefail
@@ -87,11 +88,43 @@ for modulation in BPSK QPSK 8PSK QAM16 QAM64 QAM256 QAM1024 QAM4096; do
 			rm -f "$tmp"/mo1 "$tmp"/mo2
 			out="$("$ref/modem_decode" "$tmp/mf.wav" "$tmp/mo1" "$tmp/mo2" 2>&1)"
 			check "cofdmtv->modem $label" "$out" "Es/N0"
+			# One symbol with 41 guard intervals of 1/300 s, all channels interleaved.
+			out="$("$rs" compare "$tmp/me.wav" "$tmp/mf.wav" $((rate * 41 / 300 * chans)))"
+			check "waveform modem $label" "$out" "SAME"
+			grep -q "except" <<<"$out" && echo "note: waveform modem $label: $out (a different PAPR scrambling; decoded alike)"
 			cmp -s "$tmp/mo1" "$tmp/mr_1.bin" || { fail=$((fail + 1)); echo "FAIL payload cofdmtv->modem $label"; }
 			cmp -s <(head -c 100 "$tmp/mo2") "$tmp/m2.dat" || { fail=$((fail + 1)); echo "FAIL second frame cofdmtv->modem $label"; }
 		done
 	done
 done
+
+# Waveforms of the COFDMTV encoders against the apps' (the *_ltr builds draw the noise
+# lead-in as the apps do; see tools/cxx-reference/build.sh): every picture mode, the
+# three text modes and both pings at every rate, and the channel layouts.
+for rate in 8000 16000 32000 44100 48000; do
+	for mode in 6 7 8 9 10 11 12 13; do
+		"$ref/shredpix_encode_ltr" "$tmp/wa.wav" $rate $mode DL1ABC 1800 2 1 0 "$tmp/p.bin" 2>/dev/null
+		"$rs" encode "$tmp/wb.wav" $rate $mode DL1ABC 1800 2 1 0 "$tmp/p.bin" 2>/dev/null
+		check "waveform picture $rate mode $mode" "$("$rs" compare "$tmp/wa.wav" "$tmp/wb.wav")" "SAME"
+	done
+	for text in "Hi" "Rattlegram text from COFDMtv, about one hundred bytes long, to use the middle mode of the three...." "$(printf 'x%.0s' $(seq 1 170))"; do
+		"$ref/rattlegram_codec_ltr" encode "$tmp/wt.wav" $rate DL1ABC 1500 2 1 0 "$text" 2>/dev/null
+		"$rs" encode "$tmp/wu.wav" $rate text DL1ABC 1500 2 1 0 "$text" 2>/dev/null
+		check "waveform text $rate ${#text} bytes" "$("$rs" compare "$tmp/wt.wav" "$tmp/wu.wav")" "SAME"
+	done
+	"$ref/shredpix_encode_ltr" "$tmp/wp.wav" $rate 0 DL1ABC 1500 2 1 0 2>/dev/null
+	"$rs" encode "$tmp/wq.wav" $rate 0 DL1ABC 1500 2 1 0 2>/dev/null
+	check "waveform ping $rate" "$("$rs" compare "$tmp/wp.wav" "$tmp/wq.wav")" "SAME"
+	"$ref/rattlegram_codec_ltr" encode "$tmp/wr.wav" $rate DL1ABC 1500 2 1 0 2>/dev/null
+	"$rs" encode "$tmp/ws.wav" $rate textping DL1ABC 1500 2 1 0 2>/dev/null
+	check "waveform text ping $rate" "$("$rs" compare "$tmp/wr.wav" "$tmp/ws.wav")" "SAME"
+done
+"$ref/shredpix_encode_ltr" "$tmp/wa.wav" 48000 11 DL1ABC -1200 2 1 4 "$tmp/p.bin" 2>/dev/null
+"$rs" encode "$tmp/wb.wav" 48000 11 DL1ABC -1200 2 1 4 "$tmp/p.bin" 2>/dev/null
+check "waveform picture I/Q" "$("$rs" compare "$tmp/wa.wav" "$tmp/wb.wav")" "SAME"
+"$ref/rattlegram_codec_ltr" encode "$tmp/wt.wav" 16000 DL1ABC 1700 2 1 2 "Right channel" 2>/dev/null
+"$rs" encode "$tmp/wu.wav" 16000 text DL1ABC 1700 2 1 2 "Right channel" 2>/dev/null
+check "waveform text right channel" "$("$rs" compare "$tmp/wt.wav" "$tmp/wu.wav")" "SAME"
 
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

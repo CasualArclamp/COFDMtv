@@ -13,7 +13,7 @@ mod window;
 
 pub use fft::Fft;
 pub use filters::{BlockDc, Hilbert};
-pub use papr::improve_papr;
+pub use papr::{Clip, improve_papr};
 pub use theil_sen::TheilSen;
 pub use window::{BipBuffer, Delay, FallingEdge, Phasor, SchmittTrigger, SlidingSum};
 

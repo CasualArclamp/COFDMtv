@@ -25,7 +25,8 @@ datagrams, transmit and receive, in Rust, with DecDRM's look (`F:\DRM`). Read
   compat fixtures, engine round trips); `bash scripts/smoke-test.sh target/release OUT`
   (CLI and GUI end to end, as CI runs it).
 - Cross-check against the originals (local only, needs the reference build):
-  `bash tools/cxx-reference/build.sh`, then `bash scripts/xcheck.sh` (216 checks) and
+  `bash tools/cxx-reference/build.sh`, then `bash scripts/xcheck.sh` (347 checks:
+  decoding both ways, waveforms sample by sample) and
   `bash scripts/sensitivity.sh [TRIALS] [multipath]` (also build aicodix/disorders into
   `target/cxx-reference`).
 - CLI: `cargo run --release -p cofdmtv-cli -- rx FILE|--device NAME`,
