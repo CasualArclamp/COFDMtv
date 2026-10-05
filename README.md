@@ -16,6 +16,10 @@ A desktop transceiver for the aicodix audio modems, in Rust, with the look of
   (up to 1024: 250 kB in the smallest frames, 7 MB in the largest), extra frames making
   up for lost ones.
 
+![COFDMtv receiving a recording: the spectrum, the waterfall with the call signs of two transmissions' fancy headers, the QPSK constellation, the picture received, and messages from Rattlegram and the modem](docs/images/receiver.png)
+
+![The transmitter after sending a picture in three frames: the original and the WebP as it will arrive, mode, carrier and lead-in, and the status panel with the output spectrum](docs/images/transmitter.png)
+
 COFDMTV is OFDM with 160 ms symbols (6.25 Hz carrier spacing) and a 1/8 guard interval,
 differentially PSK modulated, protected by systematic polar codes with a CRC — see
 [aicodix.de/cofdmtv](https://www.aicodix.de/cofdmtv/). The modem is coherent OFDM with
@@ -23,7 +27,8 @@ differentially PSK modulated, protected by systematic polar codes with a CRC —
 
 The modems are ports of the original C++, checked against it in both directions: every
 picture and text mode, every sample rate, multi-frame pictures, and all 64 modem modes
-decode in COFDMtv from the originals' signals and in the originals from COFDMtv's.
+decode in COFDMtv from the originals' signals and in the originals from COFDMtv's, and
+COFDMtv's signals equal the originals' sample by sample.
 
 ## The program
 

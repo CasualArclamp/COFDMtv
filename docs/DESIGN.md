@@ -173,5 +173,5 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
       payload), multi-frame, text, ping; sound card or WAV.
 - [x] M5 — aicodix modem datagrams: core (all 64 modes cross-checked both ways), engine
       (both decoders on one input), CLI `tx data`, GUI Data kind and Files tab.
-- [ ] M6 — GitHub repository and CI (done), README with screenshots, portable
+- [ ] M6 — GitHub repository and CI (done), README with screenshots (done), portable
       executables.
