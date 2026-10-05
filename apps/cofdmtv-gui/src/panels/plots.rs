@@ -7,7 +7,6 @@ use super::{Palette, placeholder};
 use crate::receiver::RxSession;
 use crate::ring_image::RingImage;
 use crate::settings::{PlotTab, Span};
-use cofdmtv_engine::cofdmtv_core::coding::psk::Psk;
 use eframe::egui::{Color32, ComboBox, RichText, Ui};
 use egui_plot::{HLine, HoverPosition, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotImage, PlotPoint, PlotPoints, Points as Scatter, Span as PlotSpan, VLine};
 
@@ -74,7 +73,7 @@ pub fn spectrum_plot(ui: &mut Ui, id: &str, name: &str, s: &SpectrumView<'_>, pa
         .show(ui, |p| {
             p.set_plot_bounds(PlotBounds::from_min_max([s.span.0, y0], [s.span.1, y1]));
             if let Some((lo, hi)) = s.band {
-                p.span(PlotSpan::new("COFDMTV signal", lo..=hi).fill(pal.band).border_width(0.0));
+                p.span(PlotSpan::new("signal", lo..=hi).fill(pal.band).border_width(0.0));
             }
             if let Some(c) = s.carrier {
                 p.vline(VLine::new("carrier", c).color(pal.marker).style(LineStyle::dashed_dense()));
@@ -160,7 +159,7 @@ fn waterfall_plot(ui: &mut Ui, rx: &RxSession, texture: &mut RingImage, band: Op
             p.image(PlotImage::new("waterfall", texture_id, PlotPoint::new((x0 + x1) / 2.0, -seconds / 2.0), [(x1 - x0) as f32, seconds as f32]).uv(uv));
             if let Some((lo, hi)) = band {
                 for x in [lo, hi] {
-                    p.vline(VLine::new("COFDMTV signal", x).color(pal.band_edge).width(1.0));
+                    p.vline(VLine::new("signal", x).color(pal.band_edge).width(1.0));
                 }
             }
             if let Some(c) = carrier {
@@ -185,14 +184,15 @@ fn waterfall_plot(ui: &mut Ui, rx: &RxSession, texture: &mut RingImage, band: Op
 fn constellation(ui: &mut Ui, rx: &RxSession, pal: &Palette, side: f32) {
     let snap = &rx.snap;
     ui.vertical(|ui| {
-        let title = match (&snap.receiving, snap.psk) {
-            (Some(r), Some(psk)) => format!("{} payload ({} carriers)", psk_name(psk), r.mode.carriers()),
-            (None, Some(psk)) => format!("{} payload (last symbol)", psk_name(psk)),
-            _ => "Payload".to_string(),
+        let title = match (&snap.receiving, snap.constellation.len()) {
+            (_, 0) => "Payload".to_string(),
+            (Some(_), n) => format!("{} payload ({n} carriers)", snap.constellation_label),
+            (None, _) => format!("{} payload (last symbol)", snap.constellation_label),
         };
         ui.label(title);
-        let ideal: Vec<[f64; 2]> = snap.psk.map(|p| p.points().into_iter().map(|c| [f64::from(c.re), f64::from(c.im)]).collect()).unwrap_or_default();
-        let points: Vec<[f64; 2]> = snap.constellation.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
+        let to_f64 = |p: &[f32; 2]| [f64::from(p[0]), f64::from(p[1])];
+        let ideal: Vec<[f64; 2]> = snap.ideal.iter().map(to_f64).collect();
+        let points: Vec<[f64; 2]> = snap.constellation.iter().map(to_f64).collect();
         base_plot("constellation")
             .width(side)
             .height(side)
@@ -213,10 +213,3 @@ fn constellation(ui: &mut Ui, rx: &RxSession, pal: &Palette, side: f32) {
     });
 }
 
-fn psk_name(psk: Psk) -> &'static str {
-    match psk {
-        Psk::Bpsk => "BPSK",
-        Psk::Qpsk => "QPSK",
-        Psk::Psk8 => "8PSK",
-    }
-}

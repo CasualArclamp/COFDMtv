@@ -83,30 +83,45 @@ fn trim_zeros(data: &[u8]) -> usize {
 pub struct Picture {
     pub time: DateTime<Local>,
     pub call: String,
-    /// The mode of the (last) frame.
-    pub mode: u8,
+    /// How it came: "mode 11 (8PSK, 2400 Hz)", "modem QAM16 1/2 short".
+    pub label: String,
     /// Frames it took (1, or the blocks of a multi-frame picture).
     pub frames: usize,
     pub kind: Option<ImageKind>,
-    /// The file (a picture, or whatever the payload held).
+    /// The file.
     pub data: Vec<u8>,
-    pub flips: u32,
+    /// Bits the decoder corrected (COFDMTV reports them).
+    pub flips: Option<u32>,
     pub snr_db: f32,
     pub cfo_hz: f32,
     /// Where it was saved.
     pub saved: Option<PathBuf>,
 }
 
-/// A received text message.
+/// A received text message (Rattlegram, or a modem datagram that reads as text).
 #[derive(Debug, Clone)]
 pub struct TextMessage {
     pub time: DateTime<Local>,
     pub call: String,
-    pub mode: u8,
+    pub label: String,
     pub text: String,
-    pub flips: u32,
+    pub flips: Option<u32>,
     pub snr_db: f32,
     pub cfo_hz: f32,
+}
+
+/// A received modem datagram or file that is neither text nor a picture.
+#[derive(Debug, Clone)]
+pub struct ReceivedFile {
+    pub time: DateTime<Local>,
+    pub call: String,
+    pub label: String,
+    /// Frames it took.
+    pub frames: usize,
+    pub data: Vec<u8>,
+    pub snr_db: f32,
+    pub cfo_hz: f32,
+    pub saved: Option<PathBuf>,
 }
 
 /// The picture of a decoded image payload: its file cut from the padding.

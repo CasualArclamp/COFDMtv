@@ -2,6 +2,8 @@
 
 use super::{Led, Palette, fmt_time, led, value};
 use crate::receiver::{Outcome, RxSession};
+use cofdmtv_engine::SignalKind;
+use cofdmtv_engine::cofdmtv_core::cofdmtv::SYMBOL_SECONDS;
 use eframe::egui::{self, RichText, Ui};
 use std::time::Duration;
 
@@ -43,7 +45,7 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
         } else {
             Led::Off
         };
-        led(ui, sync, "Sync", "a transmission found and its preamble (call sign, mode) decoded; yellow: a sync symbol whose preamble was damaged");
+        led(ui, sync, "Sync", "a transmission found and its preamble or meta data (call sign, mode) decoded; yellow: a COFDMTV sync symbol whose preamble was damaged");
         let decode = if snap.decoding {
             Led::Yellow
         } else {
@@ -68,17 +70,21 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
         };
         ui.label(RichText::new(state).strong());
         if let Some(r) = &snap.receiving {
-            value(ui, "Mode", r.mode.label());
+            value(ui, "Mode", r.label.clone());
             value(ui, "From", r.call.clone());
             value(ui, "Carrier", format!("{:.1} Hz", r.cfo_hz)).on_hover_text("Centre frequency of the signal, as the synchroniser measured it");
             value(ui, "SNR", snap.snr_db.map_or_else(|| "–".into(), |s| format!("{s:.1} dB")))
                 .on_hover_text("Signal-to-noise ratio of the last payload symbol (from its decision errors)");
             let fraction = r.symbol as f32 / r.symbols.max(1) as f32;
+            let symbol_s = match r.kind {
+                SignalKind::Cofdmtv => SYMBOL_SECONDS,
+                SignalKind::Modem => 41.0 / 300.0,
+            };
             ui.add(egui::ProgressBar::new(fraction).desired_width(150.0).text(format!("{} / {} symbols", r.symbol, r.symbols)))
-                .on_hover_text(format!("{:.1} s to go", (r.symbols - r.symbol) as f64 * 0.18));
+                .on_hover_text(format!("{:.1} s to go", r.symbols.saturating_sub(r.symbol) as f64 * symbol_s));
         } else if let Some(m) = &rx.multiframe {
             value(ui, "Multi-frame", format!("{} of {} frames from {}", m.have, m.need, m.call))
-                .on_hover_text(format!("A {}-byte picture in {} blocks: any {} frames rebuild it", m.size, m.need, m.need));
+                .on_hover_text(format!("A {}-byte file in {} blocks: any {} frames rebuild it", m.size, m.need, m.need));
         }
     });
 
@@ -107,6 +113,7 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
         value(ui, "Pictures", rx.pictures.len().to_string());
         value(ui, "Texts", texts.to_string());
         value(ui, "Pings", pings.to_string());
+        value(ui, "Files", rx.files.len().to_string());
     });
 }
 

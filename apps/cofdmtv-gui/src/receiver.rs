@@ -4,12 +4,11 @@
 //! of its latest snapshot each frame, plus the events (transmissions, pictures, texts,
 //! log lines) and waterfall rows that arrived since (see `cofdmtv_engine::receiver`). What
 //! the displays derive from them — the waterfall history, the received pictures with
-//! their textures, the message list, the indicator states — lives here.
+//! their textures, the message and file lists, the indicator states — lives here.
 
 use crate::waterfall::{Waterfall, crop};
 use chrono::{DateTime, Local};
-use cofdmtv_engine::cofdmtv_core::cofdmtv::Mode;
-use cofdmtv_engine::payload::{Picture, TextMessage};
+use cofdmtv_engine::payload::{Picture, ReceivedFile, TextMessage};
 use cofdmtv_engine::{Receiver, RxConfig, RxEvent, RxSnapshot};
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use std::collections::VecDeque;
@@ -94,7 +93,7 @@ pub enum Message {
     Ping { time: DateTime<Local>, call: String, cfo_hz: f32 },
 }
 
-/// The frames of a multi-frame picture in hand.
+/// The frames of a multi-frame picture or file in hand.
 #[derive(Debug, Clone)]
 pub struct MultiFrame {
     pub call: String,
@@ -125,6 +124,8 @@ pub struct RxSession {
     /// The picture shown large (index into `pictures`); `None`: the newest.
     pub selected: Option<usize>,
     pub messages: Vec<Message>,
+    /// Modem datagrams and files that are neither text nor pictures, newest last.
+    pub files: Vec<ReceivedFile>,
     pub multiframe: Option<MultiFrame>,
     /// The band of the transmission being received or last received (carrier and
     /// bandwidth, Hz), and when it ended.
@@ -208,8 +209,8 @@ impl RxSession {
     fn handle(&mut self, ev: RxEvent) {
         match ev {
             RxEvent::Log(line) => self.log.push(line),
-            RxEvent::Sync { mode, cfo_hz, .. } => {
-                self.band = Some((cfo_hz, band_width(mode)));
+            RxEvent::Sync { cfo_hz, bandwidth_hz, .. } => {
+                self.band = Some((cfo_hz, bandwidth_hz));
                 self.band_ended = None;
             }
             RxEvent::Ping { call, cfo_hz } => {
@@ -241,6 +242,18 @@ impl RxSession {
                 self.messages.push(Message::Text(m));
                 self.fresh = true;
             }
+            RxEvent::File(f) => {
+                self.outcome = Some((Outcome::Decoded, Instant::now()));
+                self.note(&f.call);
+                if f.frames > 1 {
+                    self.multiframe = None;
+                }
+                self.files.push(f);
+                if self.files.len() > PICTURES_KEPT {
+                    self.files.remove(0);
+                }
+                self.fresh = true;
+            }
             RxEvent::MultiFrame { call, have, need, size } => {
                 self.outcome = Some((Outcome::Decoded, Instant::now()));
                 self.multiframe = Some(MultiFrame { call, have, need, size });
@@ -267,7 +280,3 @@ impl RxSession {
     }
 }
 
-/// Width of a mode's signal, Hz (its carriers × 6.25 Hz).
-pub fn band_width(mode: Mode) -> f32 {
-    mode.carriers() as f32 * 6.25
-}

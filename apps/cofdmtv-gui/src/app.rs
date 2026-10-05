@@ -14,7 +14,7 @@ use crate::panels::source::{DeviceLists, SourceAction};
 use crate::panels::tx_page::TxPage;
 use crate::panels::{self};
 use crate::receiver::RxSession;
-use crate::settings::{Page, Settings, SettingsStore, SourceKind, ThemeChoice};
+use crate::settings::{DataSource, Page, Settings, SettingsStore, SourceKind, ThemeChoice, TxKind};
 use crate::transmitter::TxSession;
 use cofdmtv_engine::{InputSpec, RxConfig};
 use eframe::egui::{self, RichText, Ui};
@@ -225,14 +225,14 @@ impl CofdmtvApp {
     }
 
     /// Files dropped on the window: recordings go to the receiver, pictures to the
-    /// transmitter.
+    /// transmitter, other files to the transmitter as data (as do pictures dropped while a
+    /// data file is being chosen).
     fn dropped_files(&mut self, ctx: &egui::Context) {
         let files: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        let s = &self.settings;
+        let choosing_data = s.page == Page::Transmitter && s.tx_kind == TxKind::Data && s.data_source == DataSource::File;
         for path in files {
-            if has_extension(&path, &PICTURE_EXTENSIONS) {
-                self.tx_page.open_picture(&mut self.settings, &path);
-                self.settings.page = Page::Transmitter;
-            } else if has_extension(&path, &["wav", "flac"]) {
+            if has_extension(&path, &["wav", "flac"]) {
                 if self.rx.is_running() {
                     self.notice = Some("Stop the receiver to open another recording.".into());
                 } else {
@@ -240,6 +240,12 @@ impl CofdmtvApp {
                     self.settings.source = SourceKind::File;
                     self.settings.page = Page::Receiver;
                 }
+            } else if has_extension(&path, &PICTURE_EXTENSIONS) && !choosing_data {
+                self.tx_page.open_picture(&mut self.settings, &path);
+                self.settings.page = Page::Transmitter;
+            } else {
+                self.tx_page.open_data(&mut self.settings, &path);
+                self.settings.page = Page::Transmitter;
             }
         }
     }

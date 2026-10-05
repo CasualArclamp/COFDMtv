@@ -1,25 +1,32 @@
-//! Transmitter page: what to send (a picture, a text, a ping), how (mode, carrier, lead-in,
-//! fancy header) and where (sound card or file) on the left; the transmission's state, the
-//! Transmit button, the output level and spectrum on the right (DecDRM's layout).
+//! Transmitter page: what to send (a picture, a text, a ping, or data over the modem), how
+//! (mode, carrier, lead-in, fancy header) and where (sound card or file) on the left; the
+//! transmission's state, the Transmit button, the output level and spectrum on the right
+//! (DecDRM's layout).
 //!
 //! A picture is prepared as Shredpix does: scaled to a pixel budget and compressed with
 //! the best quality that fits one frame (5380 bytes), or the blocks of a multi-frame
 //! picture; a file that fits already is sent unchanged. Preparing runs on a thread of
 //! its own whenever the picture or a setting changes, and the page shows the result as
 //! the receiver will see it.
+//!
+//! Data goes over the aicodix modem: a text in one datagram, or a file in frames with
+//! the multi-frame header, all in one transmission.
 
 use super::meter::{GOOD, HOT, WARN, level_meter};
 use super::plots::{SpectrumView, spectrum_plot};
 use super::source::{DeviceLists, device_combo};
 use super::{Palette, card, enabled, fmt_time, grid, placeholder, row_label, value};
-use crate::settings::{NOISE_CHOICES, PicFormat, Pixels, Settings, TxChannelChoice, TxKind, TxOutputKind};
+use crate::settings::{DataSource, NOISE_CHOICES, PicFormat, Pixels, Settings, TxChannelChoice, TxKind, TxOutputKind};
 use crate::transmitter::TxSession;
-use cofdmtv_engine::cofdmtv_core::coding::base37;
+use cofdmtv_engine::cofdmtv_core::coding::{base37, base40};
 use cofdmtv_engine::cofdmtv_core::cofdmtv::multiframe;
 use cofdmtv_engine::cofdmtv_core::cofdmtv::{IMAGE_BYTES, Mode, RATES, SYMBOL_SECONDS, TEXT_BYTES, TxRequest};
+use cofdmtv_engine::cofdmtv_core::modem::{self, CodeRate, ModemMode, ModemRequest, Modulation};
+use cofdmtv_engine::receiver::cofdmtv_bandwidth;
 use cofdmtv_engine::{OutputSpec, TxConfig, TxJob};
 use cofdmtv_pix::{PIXEL_CHOICES, Source};
 use eframe::egui::{self, Color32, ColorImage, ComboBox, RichText, TextureHandle, TextureOptions, Ui};
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -49,6 +56,32 @@ struct PrepResult {
     preview: Option<ColorImage>,
 }
 
+/// A file to send over the modem.
+struct DataFile {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+/// Largest file read for sending (the multi-frame header has 24 bits for the size).
+const MAX_DATA_FILE: u64 = 1 << 24;
+
+fn load_data(path: &Path) -> Result<DataFile, String> {
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len > MAX_DATA_FILE {
+        return Err(format!("{len} bytes: at most {MAX_DATA_FILE}"));
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    Ok(DataFile { name, bytes })
+}
+
+/// Blocks (frames needed) and frames sent for a data file of `len` bytes in `mode`: extra
+/// frames go with a file of more than one block.
+fn data_frames(len: usize, mode: ModemMode, extra: u8) -> (usize, usize) {
+    let blocks = multiframe::blocks_in(len, mode.data_bytes());
+    (blocks, blocks + if blocks > 1 { usize::from(extra) } else { 0 })
+}
+
 /// State of the transmitter page.
 #[derive(Default)]
 pub struct TxPage {
@@ -63,6 +96,9 @@ pub struct TxPage {
     failed: Option<PrepKey>,
     error: Option<String>,
     notice: Option<String>,
+    /// The file to send as data, and why the last one could not be opened.
+    data: Option<DataFile>,
+    data_notice: Option<String>,
 }
 
 impl TxPage {
@@ -76,7 +112,27 @@ impl TxPage {
                 settings.picture = None;
             }
         }
+        if let Some(path) = settings.data_file.clone() {
+            match load_data(&path) {
+                Ok(d) => page.data = Some(d),
+                Err(_) => settings.data_file = None,
+            }
+        }
         page
+    }
+
+    /// Send the file at `path` as data (over the modem).
+    pub fn open_data(&mut self, settings: &mut Settings, path: &Path) {
+        settings.tx_kind = TxKind::Data;
+        settings.data_source = DataSource::File;
+        match load_data(path) {
+            Ok(d) => {
+                self.data = Some(d);
+                self.data_notice = None;
+                settings.data_file = Some(path.to_path_buf());
+            }
+            Err(e) => self.data_notice = Some(format!("cannot open {}: {e}", path.display())),
+        }
     }
 
     /// Use the picture at `path`.
@@ -192,15 +248,43 @@ fn preview_of(bytes: &[u8]) -> Option<ColorImage> {
 
 /// The rate the signal will be built at, for the carrier limits.
 fn signal_rate(settings: &Settings) -> u32 {
-    settings.tx_rate.filter(|r| RATES.contains(r)).unwrap_or(48_000)
+    let rates: &[u32] = if settings.tx_kind.is_modem() { &modem::RATES } else { &RATES };
+    settings.tx_rate.filter(|r| rates.contains(r)).unwrap_or(48_000)
 }
 
-/// The mode of what is to be sent.
-fn mode_of(settings: &Settings) -> Mode {
+/// The COFDMTV mode of what is to be sent (`None`: data over the modem).
+fn mode_of(settings: &Settings) -> Option<Mode> {
     match settings.tx_kind {
-        TxKind::Picture => Mode::Image(settings.tx_mode),
-        TxKind::Text => Mode::text_for(settings.text.len().max(1)).unwrap_or(Mode::Text(14)),
-        TxKind::Ping => Mode::Ping,
+        TxKind::Picture => Some(Mode::Image(settings.tx_mode)),
+        TxKind::Text => Some(Mode::text_for(settings.text.len().max(1)).unwrap_or(Mode::Text(14))),
+        TxKind::Ping => Some(Mode::Ping),
+        TxKind::Data => None,
+    }
+}
+
+/// Carrier and width of the band of what is to be sent, Hz.
+fn band_of(settings: &Settings) -> (i32, f32) {
+    match mode_of(settings) {
+        Some(mode) => (settings.carrier_hz, cofdmtv_bandwidth(mode)),
+        None => (settings.data_carrier_hz, modem::BANDWIDTH_HZ as f32),
+    }
+}
+
+/// Carriers the modem may use here: multiples of 300 Hz in the band, up to 3 kHz unless
+/// higher ones are allowed.
+fn data_carrier_range(settings: &Settings) -> RangeInclusive<i32> {
+    let iq = settings.tx_channel == TxChannelChoice::Iq;
+    let full = modem::carrier_range(signal_rate(settings), iq);
+    let max = if settings.ultrasonic { *full.end() } else { (*full.end()).min(3000) };
+    (if iq { -max } else { *full.start() })..=max
+}
+
+/// The call sign as it will go out, or why it cannot.
+fn call_sign_check(settings: &Settings) -> Result<String, String> {
+    if settings.tx_kind.is_modem() {
+        base40::check(&settings.call_sign).map(base40::decode)
+    } else {
+        base37::check(&settings.call_sign).map(|()| base37::decode(base37::encode(&settings.call_sign)))
     }
 }
 
@@ -227,9 +311,14 @@ impl TxPage {
                 row_label(ui, "Call sign");
                 ui.horizontal(|ui| {
                     let edit = egui::TextEdit::singleline(&mut settings.call_sign).desired_width(140.0).char_limit(base37::MAX_LEN).font(egui::TextStyle::Monospace);
-                    ui.add(edit).on_hover_text("Letters and digits, up to nine (base 37: space, 0–9, A–Z)");
-                    match base37::check(&settings.call_sign) {
-                        Ok(()) => ui.label(RichText::new(base37::decode(base37::encode(&settings.call_sign)).trim().to_string()).weak()),
+                    let hint = if settings.tx_kind.is_modem() {
+                        "Letters, digits and /, up to nine (the modem's base 40: space, /, 0–9, A–Z)"
+                    } else {
+                        "Letters and digits, up to nine (base 37: space, 0–9, A–Z)"
+                    };
+                    ui.add(edit).on_hover_text(hint);
+                    match call_sign_check(settings) {
+                        Ok(call) => ui.label(RichText::new(call.trim().to_string()).weak()),
                         Err(e) => ui.colored_label(Palette::for_ui(ui).error, e),
                     };
                 });
@@ -252,8 +341,76 @@ impl TxPage {
                 TxKind::Ping => {
                     placeholder(ui, "A ping sends just your call sign: about half a second (plus the lead-in and the fancy header). Assempix and Rattlegram show it as \"ping\".");
                 }
+                TxKind::Data => self.data(ui, settings),
             }
         });
+    }
+
+    /// Data over the modem: a text in one datagram, or a file.
+    fn data(&mut self, ui: &mut Ui, settings: &mut Settings) {
+        let pal = Palette::for_ui(ui);
+        let mode = settings.data_mode;
+        let size = mode.data_bytes();
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut settings.data_source, DataSource::Text, "Text").on_hover_text("A message in one datagram");
+            ui.selectable_value(&mut settings.data_source, DataSource::File, "File").on_hover_text("Any file, in as many frames as it takes");
+        });
+        ui.add_space(4.0);
+        match settings.data_source {
+            DataSource::Text => {
+                let hint = format!("Your message (UTF-8, up to {size} bytes in one {} datagram)", mode.label());
+                ui.add(egui::TextEdit::multiline(&mut settings.text).desired_rows(4).desired_width(f32::INFINITY).hint_text(hint));
+                let len = settings.text.len();
+                let color = if len > size { pal.error } else { ui.visuals().weak_text_color() };
+                ui.label(RichText::new(format!("{len} / {size} bytes")).color(color).monospace());
+            }
+            DataSource::File => {
+                ui.horizontal(|ui| {
+                    if ui.button("Open file…").clicked() {
+                        let mut dialog = rfd::FileDialog::new().set_title("Open a file to send");
+                        if let Some(dir) = settings.data_file.as_deref().and_then(Path::parent).filter(|d| d.is_dir()) {
+                            dialog = dialog.set_directory(dir);
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            self.open_data(settings, &path);
+                        }
+                    }
+                    match &self.data {
+                        Some(d) => {
+                            ui.add(egui::Label::new(RichText::new(&d.name).monospace()).truncate());
+                        }
+                        None => {
+                            ui.label(RichText::new("or drop a file on the window").weak().italics());
+                        }
+                    }
+                });
+                if let Some(n) = &self.data_notice {
+                    ui.colored_label(pal.error, n);
+                }
+                if let Some(d) = &self.data {
+                    let (blocks, frames) = data_frames(d.bytes.len(), mode, settings.extra_frames);
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} bytes: {blocks} frame{} of {size} bytes", d.bytes.len(), if blocks == 1 { "" } else { "s" }));
+                        if blocks > 1 {
+                            ui.label("+");
+                            ui.add(egui::DragValue::new(&mut settings.extra_frames).range(0..=64)).on_hover_text("Extra frames: lose up to this many and the file still arrives");
+                            ui.label("extra");
+                        }
+                    });
+                    let any = if frames > 1 { format!(" from any {blocks} of the {frames} frames") } else { String::new() };
+                    ui.label(
+                        RichText::new(format!("With a multi-frame header (size, CRC-32): COFDMtv rebuilds the file{any}. The original modem's decoder writes each frame as it is."))
+                            .weak(),
+                    );
+                }
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("The aicodix modem: 44.1 or 48 kHz, 2400 Hz wide. A text in one datagram arrives as a message, a file as a file (a picture as a picture).")
+                .weak()
+                .small(),
+        );
     }
 
     fn picture(&mut self, ui: &mut Ui, settings: &mut Settings) {
@@ -382,9 +539,8 @@ impl TxPage {
             if !tx.snap.spectrum.is_empty() {
                 card(ui, "Output spectrum", "", |ui| {
                     let span = crate::settings::Span::Audio.range(tx.snap.rate.max(8000), tx.snap.iq);
-                    let mode = mode_of(settings);
-                    let c = f64::from(settings.carrier_hz);
-                    let bw = f64::from(crate::receiver::band_width(mode));
+                    let (c, bw) = band_of(settings);
+                    let (c, bw) = (f64::from(c), f64::from(bw));
                     let view = SpectrumView { db: &tx.snap.spectrum, axis: tx.snap.spectrum_axis, span, band: Some((c - bw / 2.0, c + bw / 2.0)), carrier: Some(c) };
                     spectrum_plot(ui, "tx_spectrum", "output spectrum", &view, &pal, 160.0);
                 });
@@ -487,7 +643,14 @@ impl TxPage {
 
     /// Seconds on the air for what is set up.
     fn air_time(&self, settings: &Settings) -> f64 {
-        let mode = mode_of(settings);
+        let Some(mode) = mode_of(settings) else {
+            let m = settings.data_mode;
+            let frames = match (settings.data_source, &self.data) {
+                (DataSource::File, Some(d)) => data_frames(d.bytes.len(), m, settings.extra_frames).1,
+                _ => 1,
+            };
+            return m.duration_s() + m.frame_s() * (frames - 1) as f64;
+        };
         let extra = settings.noise_symbols + if settings.fancy_header { 11 } else { 0 };
         let per = (mode.air_symbols() + extra) as f64 * SYMBOL_SECONDS;
         let frames = match (&self.prepared, settings.tx_kind) {
@@ -499,7 +662,7 @@ impl TxPage {
 
     /// Why the Transmit button is off.
     pub fn problem(&self, settings: &Settings, allow_device: bool) -> Option<String> {
-        if let Err(e) = base37::check(&settings.call_sign) {
+        if let Err(e) = call_sign_check(settings) {
             return Some(format!("Call sign: {e}"));
         }
         match settings.tx_kind {
@@ -508,12 +671,29 @@ impl TxPage {
             TxKind::Picture if self.prepared.is_none() => return Some(self.error.clone().unwrap_or_else(|| "The picture is not ready.".into())),
             TxKind::Text if settings.text.is_empty() => return Some("Write a message first.".into()),
             TxKind::Text if settings.text.len() > TEXT_BYTES => return Some(format!("The message is {} bytes: at most {TEXT_BYTES}.", settings.text.len())),
+            TxKind::Data => {
+                if let Some(p) = self.data_problem(settings) {
+                    return Some(p);
+                }
+            }
             _ => {}
         }
-        let mode = mode_of(settings);
-        let range = mode.carrier_range(signal_rate(settings), settings.tx_channel == TxChannelChoice::Iq, settings.ultrasonic);
-        if !range.contains(&settings.carrier_hz) {
-            return Some(format!("Carrier: {} needs {}…{} Hz.", mode.label(), range.start(), range.end()));
+        match mode_of(settings) {
+            Some(mode) => {
+                let range = mode.carrier_range(signal_rate(settings), settings.tx_channel == TxChannelChoice::Iq, settings.ultrasonic);
+                if !range.contains(&settings.carrier_hz) {
+                    return Some(format!("Carrier: {} needs {}…{} Hz.", mode.label(), range.start(), range.end()));
+                }
+            }
+            None => {
+                if settings.tx_rate.is_some_and(|r| !modem::RATES.contains(&r)) {
+                    return Some("Sample rate: the modem needs 44.1 or 48 kHz (or Automatic).".into());
+                }
+                let range = data_carrier_range(settings);
+                if !range.contains(&settings.data_carrier_hz) || settings.data_carrier_hz % modem::CARRIER_STEP_HZ != 0 {
+                    return Some(format!("Carrier: the modem needs a multiple of 300 Hz in {}…{} Hz.", range.start(), range.end()));
+                }
+            }
         }
         match settings.tx_output {
             TxOutputKind::Device if !allow_device => Some("Sound-card output is off in this run (--no-audio).".into()),
@@ -522,33 +702,76 @@ impl TxPage {
         }
     }
 
+    /// What is wrong with the data to send, if anything.
+    fn data_problem(&self, settings: &Settings) -> Option<String> {
+        let mode = settings.data_mode;
+        let size = mode.data_bytes();
+        match settings.data_source {
+            DataSource::Text if settings.text.is_empty() => Some("Write a message first.".into()),
+            DataSource::Text if settings.text.len() > size => Some(format!(
+                "The message is {} bytes: a {} datagram holds {size}. Pick a larger mode, or send it as a file.",
+                settings.text.len(),
+                mode.label()
+            )),
+            DataSource::Text => None,
+            DataSource::File => match &self.data {
+                None => Some("Open a file first.".into()),
+                Some(d) if d.bytes.is_empty() => Some("The file is empty.".into()),
+                Some(d) => {
+                    let blocks = multiframe::blocks_in(d.bytes.len(), size);
+                    (blocks > multiframe::MAX_BLOCKS_ANY)
+                        .then(|| format!("The file needs {blocks} frames of {}: at most {}. Pick a larger mode.", mode.label(), multiframe::MAX_BLOCKS_ANY))
+                }
+            },
+        }
+    }
+
     /// Send what is set up (if nothing is in the way).
     pub fn transmit(&mut self, settings: &mut Settings, tx: &mut TxSession, allow_device: bool) {
         if self.problem(settings, allow_device).is_some() {
             return;
         }
+        let call_sign = settings.call_sign.trim().to_string();
         let request = |mode: Mode, payload: Vec<u8>| TxRequest {
             mode,
             payload,
-            call_sign: settings.call_sign.trim().to_string(),
+            call_sign: call_sign.clone(),
             carrier_hz: settings.carrier_hz,
             noise_symbols: settings.noise_symbols,
             fancy_header: settings.fancy_header,
             text_family: matches!(settings.tx_kind, TxKind::Text),
         };
         let (jobs, label) = match settings.tx_kind {
-            TxKind::Ping => (vec![TxJob { label: "ping".into(), request: request(Mode::Ping, Vec::new()), gap_s: 0.0 }], "ping".to_string()),
+            TxKind::Ping => (vec![TxJob::cofdmtv("ping", request(Mode::Ping, Vec::new()), 0.0)], "ping".to_string()),
             TxKind::Text => {
                 let bytes = settings.text.as_bytes().to_vec();
                 let label = format!("text, {} bytes", bytes.len());
-                (vec![TxJob { label: label.clone(), request: request(Mode::Text(0), bytes), gap_s: 0.0 }], label)
+                (vec![TxJob::cofdmtv(label.clone(), request(Mode::Text(0), bytes), 0.0)], label)
+            }
+            TxKind::Data => {
+                let mode = settings.data_mode;
+                let (what, frames) = match (settings.data_source, &self.data) {
+                    (DataSource::File, Some(d)) => match multiframe::split_chunks(&d.bytes, data_frames(d.bytes.len(), mode, settings.extra_frames).1, mode.data_bytes()) {
+                        Ok(frames) => (format!("{}, {} bytes", d.name, d.bytes.len()), frames),
+                        Err(e) => {
+                            tx.error = Some(e);
+                            return;
+                        }
+                    },
+                    (DataSource::File, None) => return,
+                    (DataSource::Text, _) => (format!("modem text, {} bytes", settings.text.len()), vec![settings.text.as_bytes().to_vec()]),
+                };
+                let n = frames.len();
+                let label = format!("{what}{}, {}", if n > 1 { format!(" in {n} frames") } else { String::new() }, mode.label());
+                let request = ModemRequest { mode, call_sign: call_sign.clone(), carrier_hz: settings.data_carrier_hz, frames };
+                (vec![TxJob::modem(label.clone(), request, 0.0)], label)
             }
             TxKind::Picture => {
                 let Some((_, p)) = &self.prepared else { return };
                 let mode = Mode::Image(settings.tx_mode);
                 if settings.blocks <= 1 && p.file.len() <= IMAGE_BYTES {
                     let label = format!("picture, {} bytes, mode {}", p.file.len(), settings.tx_mode);
-                    (vec![TxJob { label: label.clone(), request: request(mode, p.file.clone()), gap_s: 0.0 }], label)
+                    (vec![TxJob::cofdmtv(label.clone(), request(mode, p.file.clone()), 0.0)], label)
                 } else {
                     let needed = multiframe::blocks_for(p.file.len());
                     match multiframe::split(&p.file, needed + usize::from(settings.extra_frames)) {
@@ -558,7 +781,7 @@ impl TxPage {
                             let jobs = frames
                                 .into_iter()
                                 .enumerate()
-                                .map(|(i, f)| TxJob { label: format!("frame {} of {n}", i + 1), request: request(mode, f), gap_s: if i == 0 { 0.0 } else { 0.3 } })
+                                .map(|(i, f)| TxJob::cofdmtv(format!("frame {} of {n}", i + 1), request(mode, f), if i == 0 { 0.0 } else { 0.3 }))
                                 .collect();
                             (jobs, label)
                         }
@@ -594,46 +817,12 @@ fn text(ui: &mut Ui, settings: &mut Settings) {
 }
 
 fn signal_card(ui: &mut Ui, settings: &mut Settings) {
-    let mode = mode_of(settings);
     card(ui, "Signal", "how it sounds on the air", |ui| {
         grid(ui, "signal", |ui| {
-            row_label(ui, "Mode");
-            if settings.tx_kind == TxKind::Picture {
-                ComboBox::from_id_salt("tx_mode").width(260.0).selected_text(mode_line(Mode::Image(settings.tx_mode))).show_ui(ui, |ui| {
-                    for n in Mode::IMAGE_MODES {
-                        ui.selectable_value(&mut settings.tx_mode, n, mode_line(Mode::Image(n)));
-                    }
-                });
-            } else {
-                ui.label(RichText::new(match mode {
-                    Mode::Ping => "ping".to_string(),
-                    m => format!("{} (from the length of the text)", m.label()),
-                }).weak());
+            match mode_of(settings) {
+                Some(mode) => cofdmtv_signal(ui, settings, mode),
+                None => modem_signal(ui, settings),
             }
-            ui.end_row();
-            row_label(ui, "Carrier");
-            let range = mode.carrier_range(signal_rate(settings), settings.tx_channel == TxChannelChoice::Iq, settings.ultrasonic);
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut settings.carrier_hz).range(range.clone()).speed(10.0).suffix(" Hz"))
-                    .on_hover_text("Centre frequency of the signal (the apps use 50 Hz steps)");
-                settings.carrier_hz = (settings.carrier_hz / 50 * 50).clamp(*range.start(), *range.end());
-                let half = mode.carriers() as f32 * 3.125;
-                ui.label(RichText::new(format!("{:.0}…{:.0} Hz", settings.carrier_hz as f32 - half, settings.carrier_hz as f32 + half)).weak());
-            });
-            ui.end_row();
-            row_label(ui, "Lead-in");
-            let label = NOISE_CHOICES.iter().find(|(n, _)| *n == settings.noise_symbols).map_or("custom", |(_, l)| l);
-            ComboBox::from_id_salt("noise").selected_text(label).show_ui(ui, |ui| {
-                for (n, l) in NOISE_CHOICES {
-                    ui.selectable_value(&mut settings.noise_symbols, n, l);
-                }
-            })
-            .response
-            .on_hover_text("Noise before the signal, so that a radio's VOX and AGC settle first");
-            ui.end_row();
-            row_label(ui, "");
-            ui.checkbox(&mut settings.fancy_header, "Fancy header").on_hover_text("Draw your call sign into the waterfall after the signal (2 s)");
-            ui.end_row();
             row_label(ui, "");
             ui.checkbox(&mut settings.ultrasonic, "Carriers above 3 kHz").on_hover_text(
                 "Allow carriers up to the top of the band (Shredpix's \"ultrasonic\" option). At 44.1 and 48 kHz this reaches frequencies you may not hear: prolonged exposure to loud high-pitched sound can damage hearing.",
@@ -641,6 +830,95 @@ fn signal_card(ui: &mut Ui, settings: &mut Settings) {
             ui.end_row();
         });
     });
+}
+
+/// Mode, carrier, lead-in and fancy header of a COFDMTV transmission: rows of the signal grid.
+fn cofdmtv_signal(ui: &mut Ui, settings: &mut Settings, mode: Mode) {
+    row_label(ui, "Mode");
+    if settings.tx_kind == TxKind::Picture {
+        ComboBox::from_id_salt("tx_mode").width(260.0).selected_text(mode_line(Mode::Image(settings.tx_mode))).show_ui(ui, |ui| {
+            for n in Mode::IMAGE_MODES {
+                ui.selectable_value(&mut settings.tx_mode, n, mode_line(Mode::Image(n)));
+            }
+        });
+    } else {
+        ui.label(RichText::new(match mode {
+            Mode::Ping => "ping".to_string(),
+            m => format!("{} (from the length of the text)", m.label()),
+        }).weak());
+    }
+    ui.end_row();
+    row_label(ui, "Carrier");
+    let range = mode.carrier_range(signal_rate(settings), settings.tx_channel == TxChannelChoice::Iq, settings.ultrasonic);
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut settings.carrier_hz).range(range.clone()).speed(10.0).suffix(" Hz"))
+            .on_hover_text("Centre frequency of the signal (the apps use 50 Hz steps)");
+        settings.carrier_hz = (settings.carrier_hz / 50 * 50).clamp(*range.start(), *range.end());
+        let half = mode.carriers() as f32 * 3.125;
+        ui.label(RichText::new(format!("{:.0}…{:.0} Hz", settings.carrier_hz as f32 - half, settings.carrier_hz as f32 + half)).weak());
+    });
+    ui.end_row();
+    row_label(ui, "Lead-in");
+    let label = NOISE_CHOICES.iter().find(|(n, _)| *n == settings.noise_symbols).map_or("custom", |(_, l)| l);
+    ComboBox::from_id_salt("noise").selected_text(label).show_ui(ui, |ui| {
+        for (n, l) in NOISE_CHOICES {
+            ui.selectable_value(&mut settings.noise_symbols, n, l);
+        }
+    })
+    .response
+    .on_hover_text("Noise before the signal, so that a radio's VOX and AGC settle first");
+    ui.end_row();
+    row_label(ui, "");
+    ui.checkbox(&mut settings.fancy_header, "Fancy header").on_hover_text("Draw your call sign into the waterfall after the signal (2 s)");
+    ui.end_row();
+}
+
+/// Mode (modulation, code rate, frame size) and carrier of a modem transmission: rows of
+/// the signal grid.
+fn modem_signal(ui: &mut Ui, settings: &mut Settings) {
+    row_label(ui, "Mode");
+    ui.horizontal(|ui| {
+        let m = &mut settings.data_mode;
+        ComboBox::from_id_salt("data_modulation").width(80.0).selected_text(m.modulation.name()).show_ui(ui, |ui| {
+            for x in Modulation::ALL {
+                ui.selectable_value(&mut m.modulation, x, x.name());
+            }
+        })
+        .response
+        .on_hover_text("Modulation: more bits per carrier need a cleaner channel");
+        ComboBox::from_id_salt("data_rate").width(50.0).selected_text(m.rate.name()).show_ui(ui, |ui| {
+            for r in CodeRate::ALL {
+                ui.selectable_value(&mut m.rate, r, r.name());
+            }
+        })
+        .response
+        .on_hover_text("Code rate: the share of the coded bits that is data; lower rates correct more errors");
+        ComboBox::from_id_salt("data_frame").width(70.0).selected_text(if m.normal { "normal" } else { "short" }).show_ui(ui, |ui| {
+            ui.selectable_value(&mut m.normal, false, "short");
+            ui.selectable_value(&mut m.normal, true, "normal");
+        })
+        .response
+        .on_hover_text("Frame size: normal frames carry two to four times as much as short ones");
+    });
+    ui.end_row();
+    let m = settings.data_mode;
+    row_label(ui, "");
+    ui.label(RichText::new(format!("{} bytes a frame · {:.1} s · {:.1} kbit/s", m.data_bytes(), m.duration_s(), m.bitrate() / 1000.0)).weak());
+    ui.end_row();
+    row_label(ui, "Carrier");
+    let range = data_carrier_range(settings);
+    ui.horizontal(|ui| {
+        ui.add(egui::Slider::new(&mut settings.data_carrier_hz, range.clone()).step_by(f64::from(modem::CARRIER_STEP_HZ)).suffix(" Hz"))
+            .on_hover_text("Centre frequency of the signal (the modem uses multiples of 300 Hz)");
+        let step = modem::CARRIER_STEP_HZ;
+        settings.data_carrier_hz = ((settings.data_carrier_hz as f32 / step as f32).round() as i32 * step).clamp(*range.start(), *range.end());
+        let half = modem::BANDWIDTH_HZ / 2;
+        ui.label(RichText::new(format!("{}…{} Hz", settings.data_carrier_hz - half, settings.data_carrier_hz + half)).weak());
+    });
+    ui.end_row();
+    row_label(ui, "");
+    ui.label(RichText::new("The modem starts with a noise symbol of its own: no lead-in or fancy header.").weak().small());
+    ui.end_row();
 }
 
 fn mode_line(mode: Mode) -> String {
@@ -685,9 +963,10 @@ fn output_card(ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) 
             }
             row_label(ui, "Sample rate");
             let label = |r: Option<u32>| r.map_or_else(|| "Automatic".to_string(), |r| format!("{} Hz", r));
+            let rates: &[u32] = if settings.tx_kind.is_modem() { &modem::RATES } else { &RATES };
             ComboBox::from_id_salt("tx_rate").selected_text(label(settings.tx_rate)).show_ui(ui, |ui| {
                 ui.selectable_value(&mut settings.tx_rate, None, "Automatic").on_hover_text("The sound card's rate (files: 48 kHz)");
-                for r in RATES {
+                for &r in rates {
                     ui.selectable_value(&mut settings.tx_rate, Some(r), label(Some(r)));
                 }
             })

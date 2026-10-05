@@ -9,6 +9,7 @@
 //! older versions still load after new fields are added (and unknown fields from newer
 //! versions are ignored).
 
+use cofdmtv_engine::cofdmtv_core::modem::{self, CodeRate, ModemMode, Modulation};
 use cofdmtv_engine::{ChannelSel, TxChannel};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -161,6 +162,7 @@ pub enum SideTab {
     #[default]
     Pictures,
     Messages,
+    Files,
 }
 
 /// What the transmitter sends.
@@ -171,17 +173,51 @@ pub enum TxKind {
     Picture,
     Text,
     Ping,
+    /// Modem datagrams: a text or a file.
+    Data,
 }
 
 impl TxKind {
-    pub const ALL: [TxKind; 3] = [Self::Picture, Self::Text, Self::Ping];
+    pub const ALL: [TxKind; 4] = [Self::Picture, Self::Text, Self::Ping, Self::Data];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Picture => "Picture",
             Self::Text => "Text",
             Self::Ping => "Ping",
+            Self::Data => "Data",
         }
+    }
+
+    /// Sent over the aicodix modem rather than COFDMTV.
+    pub fn is_modem(self) -> bool {
+        self == Self::Data
+    }
+}
+
+/// What the modem sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DataSource {
+    /// The message (one datagram).
+    #[default]
+    Text,
+    /// A file, in as many frames as it takes.
+    File,
+}
+
+/// A [`ModemMode`] in the settings file by its name, "QAM16 1/2 short".
+mod modem_mode_name {
+    use cofdmtv_engine::cofdmtv_core::modem::ModemMode;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(mode: &ModemMode, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&mode.label())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ModemMode, D::Error> {
+        let name = String::deserialize(d)?;
+        ModemMode::all().find(|m| m.label().eq_ignore_ascii_case(name.trim())).ok_or_else(|| D::Error::custom(format!("unknown modem mode \"{name}\"")))
     }
 }
 
@@ -310,7 +346,14 @@ pub struct Settings {
     pub extra_frames: u8,
     /// Send a picture file unchanged when it fits.
     pub send_as_is: bool,
+    /// The message (Rattlegram, or a modem datagram).
     pub text: String,
+    /// Modem: mode, carrier (a multiple of 300 Hz), a text or a file.
+    #[serde(with = "modem_mode_name")]
+    pub data_mode: ModemMode,
+    pub data_carrier_hz: i32,
+    pub data_source: DataSource,
+    pub data_file: Option<PathBuf>,
     pub tx_output: TxOutputKind,
     pub tx_device: Option<String>,
     pub tx_file: Option<PathBuf>,
@@ -350,6 +393,10 @@ impl Default for Settings {
             extra_frames: 1,
             send_as_is: true,
             text: String::new(),
+            data_mode: ModemMode { modulation: Modulation::Qam16, rate: CodeRate::Half, normal: false },
+            data_carrier_hz: modem::DEFAULT_CARRIER_HZ,
+            data_source: DataSource::Text,
+            data_file: None,
             tx_output: TxOutputKind::Device,
             tx_device: None,
             tx_file: None,
@@ -456,14 +503,20 @@ mod tests {
             pixels: Pixels::Max(1 << 16),
             tx_rate: Some(8000),
             text: "Grüße".into(),
+            tx_kind: TxKind::Data,
+            data_mode: ModemMode { modulation: Modulation::Psk8, rate: CodeRate::FiveSixths, normal: true },
+            data_source: DataSource::File,
             ..Settings::default()
         };
+        assert!(toml::to_string_pretty(&s).unwrap().contains("data_mode = \"8PSK 5/6 normal\""));
         let text = toml::to_string_pretty(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
         // Older files lack fields: defaults fill them.
         let old: Settings = toml::from_str("call_sign = \"DL1ABC\"\n").unwrap();
         assert_eq!(old.call_sign, "DL1ABC");
         assert_eq!(old.tx_mode, 11);
+        assert_eq!(old.data_mode.label(), "QAM16 1/2 short");
+        assert!(toml::from_str::<Settings>("data_mode = \"QAM17 1/2 short\"\n").is_err());
     }
 
     #[test]

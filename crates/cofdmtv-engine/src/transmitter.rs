@@ -1,10 +1,11 @@
 //! The transmitter: a worker thread turns a list of transmissions (a ping, a text, a
-//! picture, the frames of a multi-frame picture) into audio for a sound card or a file,
-//! symbol by symbol, publishing its progress like the receiver does.
+//! picture, the frames of a multi-frame picture, modem datagrams) into audio for a sound
+//! card or a file, symbol by symbol, publishing its progress like the receiver does.
 
 use crate::spectrum::SpectrumAnalyzer;
 use cofdmtv_core::cofdmtv::{Encoder, RATES, TxRequest};
 use cofdmtv_core::dsp::Cplx;
+use cofdmtv_core::modem::{self, ModemEncoder, ModemRequest};
 use cofdmtv_io::{AudioFormat, Container, Encoding, FileWriter, OutputOptions, OutputStream, Resampler, ResamplerQuality};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver as Rx, Sender, TryRecvError};
@@ -48,13 +49,34 @@ impl TxChannel {
     }
 }
 
+/// The signal of one transmission.
+#[derive(Debug, Clone)]
+pub enum TxSignal {
+    /// COFDMTV: a picture, a text or a ping.
+    Cofdmtv(TxRequest),
+    /// Modem datagrams (frames in one transmission).
+    Modem(ModemRequest),
+}
+
 /// One transmission.
 #[derive(Debug, Clone)]
 pub struct TxJob {
     pub label: String,
-    pub request: TxRequest,
+    pub signal: TxSignal,
     /// Silence before it, seconds.
     pub gap_s: f32,
+}
+
+impl TxJob {
+    /// A COFDMTV transmission.
+    pub fn cofdmtv(label: impl Into<String>, request: TxRequest, gap_s: f32) -> TxJob {
+        TxJob { label: label.into(), signal: TxSignal::Cofdmtv(request), gap_s }
+    }
+
+    /// A modem transmission.
+    pub fn modem(label: impl Into<String>, request: ModemRequest, gap_s: f32) -> TxJob {
+        TxJob { label: label.into(), signal: TxSignal::Modem(request), gap_s }
+    }
 }
 
 /// What to transmit, and where.
@@ -62,8 +84,8 @@ pub struct TxJob {
 pub struct TxConfig {
     pub output: OutputSpec,
     pub channel: TxChannel,
-    /// Sample rate to build the signal at (a COFDMTV rate); `None`: the sound card's rate if
-    /// it is one, else 48 kHz.
+    /// Sample rate to build the signal at (a COFDMTV rate; the modem needs 44.1 or 48 kHz);
+    /// `None`: the sound card's rate if it fits, else 48 kHz.
     pub rate: Option<u32>,
     /// Level relative to the apps' (0 dB: about −12 dBFS RMS).
     pub gain_db: f32,
@@ -208,13 +230,56 @@ impl Sink {
     }
 }
 
-/// The rate to build the signal at for an output running at `output_rate`.
-pub fn signal_rate(requested: Option<u32>, output_rate: u32) -> u32 {
-    requested.filter(|r| RATES.contains(r)).unwrap_or(if RATES.contains(&output_rate) { output_rate } else { 48_000 })
+/// The rate to build the signal at for an output running at `output_rate`: as requested if
+/// that is a COFDMTV rate, else the output's own if it is one, else 48 kHz; with modem
+/// transmissions 44.1 or 48 kHz.
+pub fn signal_rate(requested: Option<u32>, output_rate: u32, modem: bool) -> u32 {
+    let ok = |r: &u32| if modem { modem::RATES.contains(r) } else { RATES.contains(r) };
+    requested.filter(ok).unwrap_or(if ok(&output_rate) { output_rate } else { 48_000 })
+}
+
+/// The encoders of a session, one per kind.
+struct Encoders {
+    cofdmtv: Encoder,
+    modem: Option<ModemEncoder>,
+}
+
+impl Encoders {
+    /// Set up `signal`; returns the transmission's chunks and seconds.
+    fn configure(&mut self, signal: &TxSignal) -> Result<(usize, f64), String> {
+        match signal {
+            TxSignal::Cofdmtv(r) => {
+                self.cofdmtv.configure(r)?;
+                let l = self.cofdmtv.layout();
+                let n = self.cofdmtv.total_symbols();
+                Ok((n, (n * l.extended_len) as f64 / f64::from(l.rate)))
+            }
+            TxSignal::Modem(r) => {
+                let m = self.modem.as_mut().ok_or("the modem needs 44.1 or 48 kHz")?;
+                m.configure(r)?;
+                Ok((m.total_chunks(), m.total_seconds()))
+            }
+        }
+    }
+
+    fn next(&mut self, signal: &TxSignal) -> Option<&[Cplx]> {
+        match signal {
+            TxSignal::Cofdmtv(_) => self.cofdmtv.next_symbol(),
+            TxSignal::Modem(_) => self.modem.as_mut()?.next_chunk(),
+        }
+    }
+
+    fn produced(&self, signal: &TxSignal) -> usize {
+        match signal {
+            TxSignal::Cofdmtv(_) => self.cofdmtv.produced_symbols(),
+            TxSignal::Modem(_) => self.modem.as_ref().map_or(0, ModemEncoder::produced_chunks),
+        }
+    }
 }
 
 fn run(cfg: &TxConfig, commands: &Rx<()>, events: &Sender<TxEvent>, shared: &Arc<Mutex<(u64, TxSnapshot)>>) -> Result<(), String> {
     let two = cfg.channel != TxChannel::Mono;
+    let any_modem = cfg.jobs.iter().any(|j| matches!(j.signal, TxSignal::Modem(_)));
     let (mut sink, rate, out_format, destination) = match &cfg.output {
         OutputSpec::Device { name } => {
             let opts = OutputOptions {
@@ -229,7 +294,7 @@ fn run(cfg: &TxConfig, commands: &Rx<()>, events: &Sender<TxEvent>, shared: &Arc
             if two && format.channels < 2 {
                 return Err(format!("{} has one channel: {} needs two", stream.device_name(), cfg.channel.label()));
             }
-            let rate = signal_rate(cfg.rate, format.sample_rate);
+            let rate = signal_rate(cfg.rate, format.sample_rate, any_modem);
             let resampler = if rate == format.sample_rate {
                 None
             } else {
@@ -239,7 +304,7 @@ fn run(cfg: &TxConfig, commands: &Rx<()>, events: &Sender<TxEvent>, shared: &Arc
             (Sink::Device { stream, resampler }, rate, format, name)
         }
         OutputSpec::File { path } => {
-            let rate = signal_rate(cfg.rate, 48_000);
+            let rate = signal_rate(cfg.rate, 48_000, any_modem);
             let format = AudioFormat::new(rate, if two { 2 } else { 1 });
             let container = Container::from_path(path).unwrap_or(Container::Wav);
             let w = FileWriter::create(path, format, container, Encoding::Int16).map_err(|e| e.to_string())?;
@@ -247,14 +312,12 @@ fn run(cfg: &TxConfig, commands: &Rx<()>, events: &Sender<TxEvent>, shared: &Arc
         }
     };
     let channels = out_format.channels;
-    let mut enc = Encoder::new(rate).ok_or(format!("{rate} Hz is not a COFDMTV rate"))?;
-    let layout = enc.layout();
-    let symbol_s = layout.extended_len as f64 / f64::from(rate);
+    let mut enc = Encoders { cofdmtv: Encoder::new(rate).ok_or(format!("{rate} Hz is not a COFDMTV rate"))?, modem: ModemEncoder::new(rate) };
     // Check every transmission first, and add up the time on the air.
     let mut total = 0.0;
     for job in &cfg.jobs {
-        enc.configure(&job.request).map_err(|e| format!("{}: {e}", job.label))?;
-        total += f64::from(job.gap_s) + enc.total_symbols() as f64 * symbol_s;
+        let (_, seconds) = enc.configure(&job.signal).map_err(|e| format!("{}: {e}", job.label))?;
+        total += f64::from(job.gap_s) + seconds;
     }
     let _ = events.send(TxEvent::Log(format!(
         "transmitting {} transmission{} ({total:.1} s) to {destination} at {rate} Hz{}",
@@ -283,35 +346,36 @@ fn run(cfg: &TxConfig, commands: &Rx<()>, events: &Sender<TxEvent>, shared: &Arc
         }
     };
     let stopped = || !matches!(commands.try_recv(), Err(TryRecvError::Empty));
-    let mut frames = Vec::with_capacity(layout.extended_len * channels);
+    let mut frames = Vec::new();
     let mut seconds = 0.0;
+    let silence_len = (rate / 10) as usize;
     'jobs: for (index, job) in cfg.jobs.iter().enumerate() {
         let _ = events.send(TxEvent::JobStarted { index, label: job.label.clone() });
-        let gap = (job.gap_s.max(0.0) * rate as f32) as usize;
-        let silence = vec![0.0f32; layout.extended_len * channels];
-        let mut left = gap;
+        let silence = vec![0.0f32; silence_len * channels];
+        let mut left = (job.gap_s.max(0.0) * rate as f32) as usize;
         while left > 0 {
             if stopped() {
                 break 'jobs;
             }
-            let n = left.min(layout.extended_len);
+            let n = left.min(silence_len);
             sink.write(&silence[..n * channels])?;
             left -= n;
             seconds += n as f64 / f64::from(rate);
         }
-        enc.configure(&job.request)?;
+        let (chunks, _) = enc.configure(&job.signal)?;
         snap.job = index;
         snap.label = job.label.clone();
-        snap.symbols = enc.total_symbols();
+        snap.symbols = chunks;
         let started = Instant::now();
-        while let Some(sym) = enc.next_symbol() {
+        let mut sent_s = 0.0;
+        while let Some(chunk) = enc.next(&job.signal) {
             if stopped() {
                 let _ = events.send(TxEvent::Log("stopped".into()));
                 break 'jobs;
             }
             frames.clear();
             let (mut sum, mut peak) = (0.0f32, 0.0f32);
-            for &z in sym {
+            for &z in chunk {
                 let z = z * gain;
                 let (re, im) = (z.re.clamp(-1.0, 1.0), z.im.clamp(-1.0, 1.0));
                 spectrum.push(if iq { Cplx::new(re, im) } else { Cplx::new(re, 0.0) });
@@ -332,11 +396,14 @@ fn run(cfg: &TxConfig, commands: &Rx<()>, events: &Sender<TxEvent>, shared: &Arc
                     }
                 }
             }
+            let len = chunk.len();
             sink.write(&frames)?;
-            seconds += symbol_s;
+            let chunk_s = len as f64 / f64::from(rate);
+            seconds += chunk_s;
+            sent_s += chunk_s;
             let db = |p: f32| (10.0 * p.max(1e-12).log10()).max(-120.0);
-            snap.level = Some((db(sum / sym.len() as f32), db(peak * peak)));
-            snap.symbol = enc.produced_symbols();
+            snap.level = Some((db(sum / len.max(1) as f32), db(peak * peak)));
+            snap.symbol = enc.produced(&job.signal);
             snap.seconds = seconds;
             snap.spectrum = spectrum.average().to_vec();
             snap.spectrum_axis = spectrum.axis();
@@ -345,10 +412,8 @@ fn run(cfg: &TxConfig, commands: &Rx<()>, events: &Sender<TxEvent>, shared: &Arc
             publish(&snap);
         }
         let _ = events.send(TxEvent::Log(format!(
-            "{} sent: {} symbols, {:.1} s{}",
+            "{} sent: {sent_s:.1} s{}",
             job.label,
-            enc.produced_symbols(),
-            enc.produced_symbols() as f64 * symbol_s,
             if matches!(sink, Sink::File(_)) { format!(" (written in {:.2} s)", started.elapsed().as_secs_f64()) } else { String::new() }
         )));
     }

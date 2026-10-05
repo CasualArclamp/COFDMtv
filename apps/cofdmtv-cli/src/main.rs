@@ -1,17 +1,20 @@
-//! `cofdmtv` — COFDMTV pictures, text and pings from the command line.
+//! `cofdmtv` — COFDMTV pictures, Rattlegram text, pings and aicodix modem datagrams from the
+//! command line.
 //!
 //! ```text
 //! cofdmtv rx recording.wav --out-dir received
 //! cofdmtv rx --device "CABLE-A Output"
 //! cofdmtv tx picture photo.jpg --call DL1ABC -o picture.wav
 //! cofdmtv tx text "Hello" --call DL1ABC --device "CABLE-A Input"
+//! cofdmtv tx data report.pdf --modulation qam16 --frame normal --call DL1ABC -o data.wav
 //! cofdmtv devices
 //! ```
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cofdmtv_engine::cofdmtv_core::cofdmtv::multiframe;
-use cofdmtv_engine::cofdmtv_core::cofdmtv::{IMAGE_BYTES, Mode, RATES, TxRequest};
+use cofdmtv_engine::cofdmtv_core::cofdmtv::{IMAGE_BYTES, Mode, RATES, TEXT_BYTES, TxRequest};
+use cofdmtv_engine::cofdmtv_core::modem::{self, CodeRate, ModemMode, ModemRequest, Modulation};
 use cofdmtv_engine::cofdmtv_io::{list_input_devices, list_output_devices};
 use cofdmtv_engine::{ChannelSel, InputSpec, OutputSpec, Receiver, RxConfig, RxEvent, TxChannel, TxConfig, TxEvent, TxJob, Transmitter};
 use cofdmtv_pix::{Format, PIXEL_CHOICES, Source};
@@ -21,7 +24,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
-#[command(name = "cofdmtv", version, about = "COFDMTV transmitter and receiver: pictures (Shredpix/Assempix), text (Rattlegram), pings")]
+#[command(
+    name = "cofdmtv",
+    version,
+    about = "COFDMTV transmitter and receiver: pictures (Shredpix/Assempix), text (Rattlegram), pings, and aicodix modem datagrams"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -29,9 +36,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Receive from a recording or a sound card; pictures are saved, texts printed.
+    /// Receive from a recording or a sound card; pictures and files are saved, texts printed.
     Rx(RxArgs),
-    /// Transmit a picture, a text or a ping to a sound card or a file.
+    /// Transmit a picture, a text, a ping or modem datagrams to a sound card or a file.
     Tx(TxArgs),
     /// List the sound cards.
     Devices,
@@ -47,7 +54,7 @@ struct RxArgs {
     /// Channel carrying the signal.
     #[arg(long, value_enum, default_value_t = RxChannel::Mix)]
     channel: RxChannel,
-    /// Save received pictures (and a log of the messages) here.
+    /// Save received pictures and files (and a log of the messages) here.
     #[arg(long, default_value = "received")]
     out_dir: PathBuf,
     /// Pace a recording to real time.
@@ -92,6 +99,9 @@ enum TxWhat {
     },
     /// Just the call sign.
     Ping,
+    /// Modem datagrams (aicodix modem, 44.1 or 48 kHz): a text in one datagram, or a file in
+    /// frames with a multi-frame header.
+    Data(DataArgs),
 }
 
 #[derive(Args)]
@@ -128,17 +138,71 @@ enum PicFormat {
 }
 
 #[derive(Args)]
+struct DataArgs {
+    /// The file to send (in as many frames as it takes; any `blocks` of them rebuild it).
+    #[arg(required_unless_present = "text", conflicts_with = "text")]
+    file: Option<PathBuf>,
+    /// Send this text (one datagram) instead of a file.
+    #[arg(long)]
+    text: Option<String>,
+    /// Modulation.
+    #[arg(long, value_enum, default_value_t = ModArg::Qam16)]
+    modulation: ModArg,
+    /// Code rate.
+    #[arg(long, value_enum, default_value_t = RateArg::Half)]
+    code_rate: RateArg,
+    /// Frame size (normal frames carry two to four times as much).
+    #[arg(long, value_enum, default_value_t = FrameArg::Short)]
+    frame: FrameArg,
+    /// Extra frames for a file (any `blocks` of the frames rebuild it); default: 1 if the
+    /// file takes more than one frame, else 0.
+    #[arg(long)]
+    extra: Option<u16>,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum ModArg {
+    Bpsk,
+    Qpsk,
+    #[value(name = "8psk")]
+    Psk8,
+    Qam16,
+    Qam64,
+    Qam256,
+    Qam1024,
+    Qam4096,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum RateArg {
+    #[value(name = "1/2")]
+    Half,
+    #[value(name = "2/3")]
+    TwoThirds,
+    #[value(name = "3/4")]
+    ThreeQuarters,
+    #[value(name = "5/6")]
+    FiveSixths,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum FrameArg {
+    Short,
+    Normal,
+}
+
+#[derive(Args)]
 struct TxCommon {
     /// Your call sign (letters and digits, up to nine).
     #[arg(long, global = true, default_value = "ANONYMOUS")]
     call: String,
-    /// Carrier (centre) frequency, Hz.
-    #[arg(long, global = true, default_value_t = 1700)]
-    carrier: i32,
-    /// Seconds of noise before each transmission (rounded to 180 ms symbols).
+    /// Carrier (centre) frequency, Hz [default: 1700; data: 1500, a multiple of 300].
+    #[arg(long, global = true, allow_hyphen_values = true)]
+    carrier: Option<i32>,
+    /// Seconds of noise before each COFDMTV transmission (rounded to 180 ms symbols).
     #[arg(long, global = true, default_value_t = 1.0)]
     noise: f64,
-    /// Leave out the call sign drawn on the waterfall after each transmission.
+    /// Leave out the call sign drawn on the waterfall after each COFDMTV transmission.
     #[arg(long, global = true)]
     no_fancy: bool,
     /// Write to this file (WAV or FLAC) instead of a sound card.
@@ -147,8 +211,8 @@ struct TxCommon {
     /// Sound-card output (name or a unique part of it); the system default if omitted.
     #[arg(long, global = true, conflicts_with = "out")]
     device: Option<String>,
-    /// Sample rate of the signal (8000, 16000, 32000, 44100, 48000); default: the sound
-    /// card's, or 48000 for files.
+    /// Sample rate of the signal (8000, 16000, 32000, 44100, 48000; data: 44100, 48000);
+    /// default: the sound card's, or 48000 for files.
     #[arg(long, global = true)]
     rate: Option<u32>,
     /// Output channels.
@@ -166,6 +230,9 @@ enum OutChannel {
     Right,
     Iq,
 }
+
+/// COFDMTV's carrier unless one is given, Hz.
+const COFDMTV_CARRIER_HZ: i32 = 1700;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -212,6 +279,8 @@ fn rx(a: RxArgs) -> Result<()> {
     let mut rx = Receiver::start(RxConfig { input, channel, save_dir: Some(a.out_dir) });
     let mut stopping = false;
     let mut error = None;
+    let frames = |n: usize| if n > 1 { format!(" in {n} frames") } else { String::new() };
+    let saved = |s: Option<PathBuf>| s.map_or(String::new(), |s| format!(" -> {}", s.display()));
     'run: loop {
         std::thread::sleep(Duration::from_millis(50));
         let _ = rx.take_rows();
@@ -223,17 +292,28 @@ fn rx(a: RxArgs) -> Result<()> {
             match ev {
                 RxEvent::Log(line) if a.verbose => eprintln!("{line}"),
                 RxEvent::Picture(p) => println!(
-                    "{} {:<9} picture: {} bytes, {}{}",
+                    "{} {:<9} picture, {}: {} bytes, {}{}{}",
                     p.time.format("%H:%M:%S"),
                     p.call,
+                    p.label,
                     p.data.len(),
                     p.kind.map_or("unknown format", |k| k.name()),
-                    p.saved.map_or(String::new(), |s| format!(" -> {}", s.display()))
+                    frames(p.frames),
+                    saved(p.saved)
                 ),
-                RxEvent::Text(m) => println!("{} {:<9} text: {}", m.time.format("%H:%M:%S"), m.call, m.text),
+                RxEvent::File(f) => println!(
+                    "{} {:<9} file, {}: {} bytes{}{}",
+                    f.time.format("%H:%M:%S"),
+                    f.call,
+                    f.label,
+                    f.data.len(),
+                    frames(f.frames),
+                    saved(f.saved)
+                ),
+                RxEvent::Text(m) => println!("{} {:<9} text, {}: {}", m.time.format("%H:%M:%S"), m.call, m.label, m.text),
                 RxEvent::Ping { call, cfo_hz } => println!("{:<9} ping at {cfo_hz:.0} Hz", call),
                 RxEvent::MultiFrame { call, have, need, size } => println!("{call:<9} frame {have} of {need} ({size} bytes)"),
-                RxEvent::DecodeFailed { call, snr_db, .. } => println!("{call:<9} decoding failed (SNR {snr_db:.1} dB)"),
+                RxEvent::DecodeFailed { label, call, snr_db } => println!("{call:<9} {label}: decoding failed (SNR {snr_db:.1} dB)"),
                 RxEvent::Error(e) => error = Some(e),
                 RxEvent::Stopped => break 'run,
                 _ => {}
@@ -249,37 +329,25 @@ fn rx(a: RxArgs) -> Result<()> {
 
 fn tx(a: TxArgs) -> Result<()> {
     let c = &a.common;
+    let rates: &[u32] = if matches!(a.what, TxWhat::Data(_)) { &modem::RATES } else { &RATES };
     if let Some(r) = c.rate
-        && !RATES.contains(&r)
+        && !rates.contains(&r)
     {
-        bail!("rate {r}: use one of {RATES:?}");
+        bail!("rate {r}: use one of {rates:?}");
     }
-    let noise_symbols = (c.noise / 0.18).round().max(0.0) as usize;
-    let request = |mode, payload, text_family| TxRequest {
-        mode,
-        payload,
-        call_sign: c.call.clone(),
-        carrier_hz: c.carrier,
-        noise_symbols,
-        fancy_header: !c.no_fancy,
-        text_family,
-    };
+    let iq = matches!(c.channel, OutChannel::Iq);
     let jobs = match &a.what {
-        TxWhat::Ping => vec![TxJob { label: "ping".into(), request: request(Mode::Ping, Vec::new(), false), gap_s: 0.0 }],
+        TxWhat::Ping => vec![TxJob::cofdmtv("ping", cofdmtv_request(c, Mode::Ping, iq)?, 0.0)],
         TxWhat::Text { text } => {
-            if text.len() > 170 {
-                bail!("{} bytes: a text has at most 170", text.len());
+            if text.len() > TEXT_BYTES {
+                bail!("{} bytes: a text has at most {TEXT_BYTES}", text.len());
             }
-            vec![TxJob { label: "text".into(), request: request(Mode::Text(0), text.as_bytes().to_vec(), true), gap_s: 0.0 }]
+            let request = TxRequest { payload: text.as_bytes().to_vec(), ..cofdmtv_request(c, Mode::Text(0), iq)? };
+            vec![TxJob::cofdmtv("text", request, 0.0)]
         }
-        TxWhat::Picture(p) => picture_jobs(p, &request)?,
+        TxWhat::Picture(p) => picture_jobs(p, c, iq)?,
+        TxWhat::Data(d) => vec![data_job(d, c, iq)?],
     };
-    let mode = jobs[0].request.mode;
-    let rate = c.rate.unwrap_or(48_000);
-    let range = mode.carrier_range(rate, matches!(c.channel, OutChannel::Iq), true);
-    if !range.contains(&c.carrier) {
-        bail!("carrier {} Hz: {} needs {}…{} Hz here", c.carrier, mode.label(), range.start(), range.end());
-    }
     let output = match &c.out {
         Some(path) => OutputSpec::File { path: path.clone() },
         None => OutputSpec::Device { name: c.device.clone() },
@@ -314,7 +382,28 @@ fn tx(a: TxArgs) -> Result<()> {
     }
 }
 
-fn picture_jobs(p: &PictureArgs, request: &dyn Fn(Mode, Vec<u8>, bool) -> TxRequest) -> Result<Vec<TxJob>> {
+/// A COFDMTV transmission in `mode` without its payload, the carrier checked.
+fn cofdmtv_request(c: &TxCommon, mode: Mode, iq: bool) -> Result<TxRequest> {
+    let carrier = c.carrier.unwrap_or(COFDMTV_CARRIER_HZ);
+    let range = mode.carrier_range(c.rate.unwrap_or(48_000), iq, true);
+    if !range.contains(&carrier) {
+        bail!("carrier {carrier} Hz: {} needs {}…{} Hz here", mode.label(), range.start(), range.end());
+    }
+    Ok(TxRequest {
+        mode,
+        payload: Vec::new(),
+        call_sign: c.call.clone(),
+        carrier_hz: carrier,
+        noise_symbols: (c.noise / 0.18).round().max(0.0) as usize,
+        fancy_header: !c.no_fancy,
+        text_family: matches!(mode, Mode::Text(_)),
+    })
+}
+
+fn picture_jobs(p: &PictureArgs, c: &TxCommon, iq: bool) -> Result<Vec<TxJob>> {
+    let mode = Mode::Image(p.mode);
+    let template = cofdmtv_request(c, mode, iq)?;
+    let request = |payload| TxRequest { payload, ..template.clone() };
     let src = Source::open(&p.file).map_err(|e| anyhow!(e))?;
     let blocks = usize::from(p.blocks);
     let budget = if blocks == 1 { IMAGE_BYTES } else { blocks * multiframe::BLOCK_DATA };
@@ -345,9 +434,8 @@ fn picture_jobs(p: &PictureArgs, request: &dyn Fn(Mode, Vec<u8>, bool) -> TxRequ
             e.bytes
         }
     };
-    let mode = Mode::Image(p.mode);
     if blocks == 1 && file.len() <= IMAGE_BYTES {
-        return Ok(vec![TxJob { label: "picture".into(), request: request(mode, file, false), gap_s: 0.0 }]);
+        return Ok(vec![TxJob::cofdmtv("picture", request(file), 0.0)]);
     }
     let needed = multiframe::blocks_for(file.len());
     let frames = multiframe::split(&file, needed + usize::from(p.extra)).map_err(|e| anyhow!(e))?;
@@ -356,6 +444,57 @@ fn picture_jobs(p: &PictureArgs, request: &dyn Fn(Mode, Vec<u8>, bool) -> TxRequ
     Ok(frames
         .into_iter()
         .enumerate()
-        .map(|(i, f)| TxJob { label: format!("frame {} of {count}", i + 1), request: request(mode, f, false), gap_s: if i == 0 { 0.0 } else { 0.3 } })
+        .map(|(i, f)| TxJob::cofdmtv(format!("frame {} of {count}", i + 1), request(f), if i == 0 { 0.0 } else { 0.3 }))
         .collect())
+}
+
+/// A modem transmission: a text in one datagram, or a file in frames with a multi-frame
+/// header (its exact size and CRC go with it, and extra frames make up for lost ones).
+fn data_job(d: &DataArgs, c: &TxCommon, iq: bool) -> Result<TxJob> {
+    let modulation = match d.modulation {
+        ModArg::Bpsk => Modulation::Bpsk,
+        ModArg::Qpsk => Modulation::Qpsk,
+        ModArg::Psk8 => Modulation::Psk8,
+        ModArg::Qam16 => Modulation::Qam16,
+        ModArg::Qam64 => Modulation::Qam64,
+        ModArg::Qam256 => Modulation::Qam256,
+        ModArg::Qam1024 => Modulation::Qam1024,
+        ModArg::Qam4096 => Modulation::Qam4096,
+    };
+    let rate = match d.code_rate {
+        RateArg::Half => CodeRate::Half,
+        RateArg::TwoThirds => CodeRate::TwoThirds,
+        RateArg::ThreeQuarters => CodeRate::ThreeQuarters,
+        RateArg::FiveSixths => CodeRate::FiveSixths,
+    };
+    let mode = ModemMode { modulation, rate, normal: matches!(d.frame, FrameArg::Normal) };
+    let carrier = c.carrier.unwrap_or(modem::DEFAULT_CARRIER_HZ);
+    let range = modem::carrier_range(c.rate.unwrap_or(48_000), iq);
+    if carrier % modem::CARRIER_STEP_HZ != 0 || !range.contains(&carrier) {
+        bail!("carrier {carrier} Hz: the modem needs a multiple of {} Hz in {}…{} Hz here", modem::CARRIER_STEP_HZ, range.start(), range.end());
+    }
+    let size = mode.data_bytes();
+    let request = |frames| ModemRequest { mode, call_sign: c.call.clone(), carrier_hz: carrier, frames };
+    if let Some(text) = &d.text {
+        if text.is_empty() || text.len() > size {
+            bail!("{} bytes: a datagram of {} holds 1…{size}; pick a larger mode, or send a file", text.len(), mode.label());
+        }
+        return Ok(TxJob::modem("text", request(vec![text.as_bytes().to_vec()]), 0.0));
+    }
+    let path = d.file.as_ref().context("a file or --text")?;
+    let file = std::fs::read(path).with_context(|| format!("{}", path.display()))?;
+    let blocks = multiframe::blocks_in(file.len(), size);
+    let extra = d.extra.map_or(usize::from(blocks > 1), usize::from);
+    let frames = multiframe::split_chunks(&file, blocks + extra, size).map_err(|e| anyhow!(e))?;
+    eprintln!(
+        "{}: {} bytes in {} {} frame{} of {size} bytes (any {blocks} rebuild it), {:.1} s",
+        path.display(),
+        file.len(),
+        frames.len(),
+        mode.label(),
+        if frames.len() == 1 { "" } else { "s" },
+        mode.duration_s() + mode.frame_s() * (frames.len() - 1) as f64
+    );
+    let name = path.file_name().map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
+    Ok(TxJob::modem(name, request(frames), 0.0))
 }

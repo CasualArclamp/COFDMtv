@@ -38,6 +38,24 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
   scales them is capped at 40 dB so a noiseless loopback cannot produce infinities.
 - **Sample rates**: COFDMTV at 8, 16, 32, 44.1 and 48 kHz natively (the symbol is 160 ms
   at every rate); other device rates get resampled.
+- **The modem** is aicodix/modem's `encode.cc`/`decode.cc`, defined at 44.1 and 48 kHz
+  only: Schmidl–Cox on two back-to-back sync symbols, the base-40 meta symbol (call sign,
+  mode, CRC-16, polar 256/72), payloads in non-systematic polar codes of 2^11…2^16 bits,
+  BPSK…QAM4096, Theil–Sen tracking on the pilots, the PAPR scrambling number in a
+  Hadamard code. Payload list size 32. Same sample positions and Es/N0 as the original.
+- **One receiver for both systems**: at 44.1 and 48 kHz the receiver runs the modem's
+  decoder beside COFDMTV's on the same samples (their sync symbols differ in length, so
+  neither mistakes the other's); at the other rates only COFDMTV.
+- **What goes over the modem**: a text in one datagram, zero padded, as the original
+  encoder sends a file; a file in frames carrying COFDMTV's multi-frame (CRS) header, the
+  chunk being the mode's datagram size (up to 1024 blocks) — a COFDMtv extension that
+  gives the receiver the exact size and a CRC-32 and lets extra frames make up for lost
+  ones (the original decoder writes each frame as it is). A received datagram is a part
+  of such a file, else a picture if it is one (trimmed), else text if it is printable
+  UTF-8, else a file (the whole datagram, as the original writes it).
+- **Modem carriers** are multiples of 300 Hz from 1200 Hz (real signals) as the original
+  encoder allows; the GUI keeps them up to 3 kHz unless "Carriers above 3 kHz" is on, as
+  for COFDMTV. Modem call signs are base 40 (with `/`), COFDMTV's base 37.
 - **License**: GPL-2.0-or-later, as DecDRM (whose GUI and audio code COFDMtv reuses).
 
 ## Verification
@@ -45,9 +63,10 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
 - `tools/cxx-reference/build.sh` builds the original programs (Shredpix encoder, Assempix
   decoder with its CRS bookkeeping, Rattlegram codec, the CRS chunk tool, the modem) with
   MSYS2's g++ from clones in `reference/` (git-ignored).
-- `scripts/xcheck.sh`: 88 checks, both directions (originals → COFDMtv, COFDMtv →
-  originals), five rates, picture modes 6/9/10/13, three text lengths, pings, I/Q and
-  stereo. Multi-frame checked both ways by hand (2026-10-05): COFDMtv frames rebuild in the
+- `scripts/xcheck.sh`: 216 checks, both directions (originals → COFDMtv, COFDMtv →
+  originals): COFDMTV at five rates, picture modes 6/9/10/13, three text lengths, pings,
+  I/Q and stereo; the modem's 64 modes (eight modulations, four code rates, short and
+  normal frames) at 44.1 and 48 kHz, with identical Es/N0 to the original decoder. Multi-frame checked both ways by hand (2026-10-05): COFDMtv frames rebuild in the
   Assempix logic and vice versa, with a frame missing; CRS chunks are byte-identical to
   aicodix/crs.
 - `scripts/sensitivity.sh`: identical impaired signals (aicodix/disorders: 23.5 Hz CFO,
@@ -58,35 +77,39 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
 ## Layout
 
 - `crates/cofdmtv-core` — pure-Rust modems: `coding/` (CRC, MLS, xorshift, BCH + OSD,
-  polar encoder and CA-SCL decoder, PSK, CRS over GF(2^16), base-37 call signs,
-  generated tables), `dsp/` (FFT, DC blocker, Hilbert, NCO, sliding buffers/sums,
-  triggers, Theil–Sen, PAPR clipping), `cofdmtv/` (modes, sync, preamble, encoder,
-  decoder, multi-frame).
+  polar encoder and CA-SCL decoder, PSK, QAM, Hadamard, CRS over GF(2^16), base-37 and
+  base-40 call signs, generated tables), `dsp/` (FFT, DC blocker, Hilbert, NCO, sliding
+  buffers/sums, triggers, Theil–Sen, PAPR clipping, Schmidl–Cox), `cofdmtv/` (modes,
+  sync, preamble, encoder, decoder, multi-frame), `modem/` (modes, encoder, decoder).
 - `crates/cofdmtv-io` — DecDRM's `decdrm-io` without the audio player: WAV/FLAC reading
   (symphonia) and writing (hound, flacenc), rubato resampling, cpal sound cards behind
   lock-free ring buffers.
-- `crates/cofdmtv-engine` — worker threads: `Receiver` (source → decoder, spectrum,
-  level → snapshots and events; a second thread list-decodes payloads, rebuilds
-  multi-frame pictures and saves them as Assempix names them) and `Transmitter` (jobs →
-  encoder → sound card or file).
+- `crates/cofdmtv-engine` — worker threads: `Receiver` (source → COFDMTV and modem
+  decoders, spectrum, level → snapshots and events; a second thread list-decodes
+  payloads, rebuilds multi-frame pictures and files and saves them as Assempix names
+  them) and `Transmitter` (jobs, COFDMTV or modem → encoder → sound card or file).
 - `crates/cofdmtv-pix` — pictures to send: EXIF orientation, scaling to Shredpix's pixel
   budgets within Assempix's 16…1024 sides, JPEG/PNG/WebP (libwebp, vendored) at the
   highest quality that fits; decoding received ones for display.
-- `apps/cofdmtv-cli` — `cofdmtv rx|tx picture|text|ping|devices`.
+- `apps/cofdmtv-cli` — `cofdmtv rx|tx picture|text|ping|data|devices`.
 
 ## More choices
 
 - Sources at a rate the modems do not support are resampled to 48 kHz; the transmitter
-  builds the signal at the sound card's rate when it is a COFDMTV rate (else 48 kHz and
-  resamples), files at 48 kHz unless told otherwise.
-- At the end of a recording the receiver feeds half a second of silence, so that a
-  transmission at the very end is still found (the synchroniser looks two symbols back).
+  builds the signal at the sound card's rate when it is a rate of the system sent
+  (COFDMTV's five, the modem's two; else 48 kHz and resamples), files at 48 kHz unless
+  told otherwise.
+- At the end of a recording the receiver feeds a second of silence, so that a
+  transmission at the very end is still found (COFDMTV's synchroniser looks two symbols
+  back, the modem's decoder runs about five symbols behind its input).
 - Multi-frame state is kept after a picture is complete (further frames of it are
   "redundant", as in Assempix); a frame of another file starts afresh.
 - Received pictures are trimmed of the payload's zero padding by format (WebP by its RIFF
   size, AVIF by its boxes, JPEG/PNG by the trailing zeros) before saving.
 - Live test (2026-10-05): CLI transmitter into VB-Audio cable A, CLI receiver on its
-  output: text and picture received intact.
+  output: text and picture received intact. Modem (same day): a QAM16 text, a 10594-byte JPEG in
+  five QAM64 3/4 normal frames built at 44.1 kHz, then a Rattlegram text, into one
+  receiver: all intact, the picture rebuilt from its first four frames.
 
 ## GUI (`apps/cofdmtv-gui`)
 
@@ -98,17 +121,20 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
   folder) → status strip (LEDs Input / Sync / Decode, state, mode, sender, carrier, SNR,
   symbol progress; level, position, counts) → plot tabs Overview / Spectrum / Waterfall /
   Constellation with a span choice (4 kHz, 8 kHz, full band; the waterfall keeps 6.25 Hz
-  bins so the fancy header's call sign reads) → side panel: the latest or chosen picture,
-  its facts and Open/Folder, a multi-frame progress card, the gallery or the messages.
+  bins so the fancy header's call sign reads; the constellation shows the payload's
+  modulation, PSK or QAM) → side panel: the latest or chosen picture, its facts and
+  Open/Folder, a multi-frame progress card, the gallery, the messages, or the files.
 - Transmitter: cards Station (call sign, checked live), Send (Picture with original and
   "as it will arrive" previews, format, size, frames + extra, send-as-is; Text with a
-  byte counter and the mode it takes; Ping), Signal (mode, carrier within the range the
-  mode allows, lead-in, fancy header, carriers above 3 kHz), Output (sound card or file,
-  rate, channels, level); status side: Transmission (state, the big Transmit/Stop button
-  with the reason it is off, frame k of n, progress), Output (meter, destination, rates),
-  Output spectrum, Sent.
+  byte counter and the mode it takes; Ping; Data: a text or a file over the modem, with
+  the frames it takes and extra frames), Signal (COFDMTV: mode, carrier within the range
+  the mode allows, lead-in, fancy header; modem: modulation, code rate, frame size with
+  bytes, duration and bit rate, carrier in 300 Hz steps; both: carriers above 3 kHz),
+  Output (sound card or file, rate, channels, level); status side: Transmission (state,
+  the big Transmit/Stop button with the reason it is off, frame k of n, progress), Output
+  (meter, destination, rates), Output spectrum, Sent.
 - Pictures are prepared on a thread whenever an input changes; drag and drop: recordings
-  to the receiver, pictures to the transmitter. `--start`, `--transmit`, `--page`,
+  to the receiver, pictures to the transmitter, other files to the transmitter as data. `--start`, `--transmit`, `--page`,
   `--no-audio`, `--config`, `--screenshot`, `--exit-after`, `--window-size` as in DecDRM.
 - Default save folder `Pictures\COFDMtv` (Assempix saves to Pictures). Test runs must use
   `--config` with a `save_dir` under `out/` so nothing lands in the user's Pictures.
@@ -125,5 +151,7 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
       constellation, received pictures/text, log.
 - [x] M4 — GUI transmitter page: picture preparation (resize, JPEG/PNG/WebP fitted to the
       payload), multi-frame, text, ping; sound card or WAV.
-- [ ] M5 — aicodix modem datagrams: core, CLI, GUI.
-- [ ] M6 — GitHub repository, CI, README with screenshots, portable executables.
+- [x] M5 — aicodix modem datagrams: core (all 64 modes cross-checked both ways), engine
+      (both decoders on one input), CLI `tx data`, GUI Data kind and Files tab.
+- [ ] M6 — GitHub repository and CI (done), README with screenshots, portable
+      executables.

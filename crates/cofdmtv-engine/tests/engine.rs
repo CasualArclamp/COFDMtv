@@ -41,9 +41,9 @@ fn picture_text_and_ping_through_a_file() {
     let jpeg = std::fs::read(fixture("testcard.jpg")).unwrap();
     let text = "Grüße from the engine test";
     let jobs = vec![
-        TxJob { label: "picture".into(), request: request(Mode::Image(11), jpeg.clone()), gap_s: 0.5 },
-        TxJob { label: "text".into(), request: request(Mode::Text(0), text.as_bytes().to_vec()), gap_s: 0.5 },
-        TxJob { label: "ping".into(), request: request(Mode::Ping, Vec::new()), gap_s: 0.5 },
+        TxJob::cofdmtv("picture", request(Mode::Image(11), jpeg.clone()), 0.5),
+        TxJob::cofdmtv("text", request(Mode::Text(0), text.as_bytes().to_vec()), 0.5),
+        TxJob::cofdmtv("ping", request(Mode::Ping, Vec::new()), 0.5),
     ];
     transmit(&wav, 16000, TxChannel::Mono, jobs);
     let saves = dir.path().join("received");
@@ -71,7 +71,7 @@ fn multiframe_iq_flac() {
         .into_iter()
         .enumerate()
         .skip(1) // the first frame "lost"
-        .map(|(i, f)| TxJob { label: format!("frame {i}"), request: request(Mode::Image(10), f), gap_s: 0.2 })
+        .map(|(i, f)| TxJob::cofdmtv(format!("frame {i}"), request(Mode::Image(10), f), 0.2))
         .collect();
     transmit(&flac, 32000, TxChannel::Iq, jobs);
     let events = receive(&flac, ChannelSel::Iq, None);
@@ -79,4 +79,30 @@ fn multiframe_iq_flac() {
     let picture = events.iter().find_map(|e| if let RxEvent::Picture(p) = e { Some(p) } else { None }).expect("the picture");
     assert_eq!(picture.frames, 2);
     assert_eq!(picture.data, file);
+}
+
+#[test]
+fn modem_text_and_file() {
+    use cofdmtv_core::cofdmtv::multiframe;
+    use cofdmtv_core::modem::{CodeRate, ModemMode, ModemRequest, Modulation};
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("modem.wav");
+    let text = "Modem datagram: hello";
+    let mode = ModemMode { modulation: Modulation::Qam16, rate: CodeRate::Half, normal: false };
+    // A file of four blocks in five frames (one extra), the first frame lost.
+    let file: Vec<u8> = (0..900u32).map(|i| (i * 7 + 3) as u8).collect();
+    let blocks = multiframe::blocks_in(file.len(), mode.data_bytes());
+    let frames = multiframe::split_chunks(&file, blocks + 1, mode.data_bytes()).unwrap();
+    let jobs = vec![
+        TxJob::modem("text", ModemRequest { mode, call_sign: "DL1ABC".into(), carrier_hz: 1500, frames: vec![text.as_bytes().to_vec()] }, 0.3),
+        TxJob::modem("file", ModemRequest { mode, call_sign: "DL1ABC".into(), carrier_hz: 1800, frames: frames[1..].to_vec() }, 0.3),
+    ];
+    transmit(&wav, 48000, TxChannel::Mono, jobs);
+    let saves = dir.path().join("received");
+    let events = receive(&wav, ChannelSel::Mix, Some(saves));
+    assert!(events.iter().any(|e| matches!(e, RxEvent::Text(m) if m.text == text && m.label.contains("QAM16"))), "{events:?}");
+    let got = events.iter().find_map(|e| if let RxEvent::File(f) = e { Some(f) } else { None }).expect("the file");
+    assert_eq!(got.data, file);
+    assert_eq!(got.frames, blocks);
+    assert_eq!(std::fs::read(got.saved.as_ref().unwrap()).unwrap(), file);
 }

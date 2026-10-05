@@ -17,5 +17,5 @@ pub mod transmitter;
 pub use cofdmtv_core;
 pub use cofdmtv_io;
 pub use input::{ChannelSel, InputSpec, SourceInfo};
-pub use receiver::{Receiver, Receiving, RxConfig, RxEvent, RxSnapshot};
-pub use transmitter::{OutputSpec, TxChannel, TxConfig, TxEvent, TxJob, TxSnapshot, Transmitter};
+pub use receiver::{Receiver, Receiving, RxConfig, RxEvent, RxSnapshot, SignalKind};
+pub use transmitter::{OutputSpec, TxChannel, TxConfig, TxEvent, TxJob, TxSignal, TxSnapshot, Transmitter};

@@ -47,6 +47,17 @@ pub(crate) const MLS2_POLY: u32 = 0x163;
 pub const BANDWIDTH_HZ: i32 = 2400;
 /// Carrier frequencies are multiples of this, Hz.
 pub const CARRIER_STEP_HZ: i32 = 300;
+/// The original's usual carrier frequency, Hz.
+pub const DEFAULT_CARRIER_HZ: i32 = 1500;
+
+/// Carrier frequencies (multiples of [`CARRIER_STEP_HZ`] in this range) that keep the band
+/// within a `rate` signal, as the original's encoder allows them: from half the bandwidth
+/// up for a real signal, symmetric around 0 Hz for I/Q.
+pub fn carrier_range(rate: u32, iq: bool) -> std::ops::RangeInclusive<i32> {
+    let max = (rate as i32 / 2 - BANDWIDTH_HZ / 2) / CARRIER_STEP_HZ * CARRIER_STEP_HZ;
+    let min = if iq { -max } else { BANDWIDTH_HZ / 2 };
+    min..=max
+}
 
 /// The pilot position of symbol `j` (0 = the meta symbol).
 pub(crate) fn seed_off(j: usize) -> usize {
@@ -153,6 +164,18 @@ pub struct ModemMode {
 }
 
 impl ModemMode {
+    /// All 64 modes: modulations, code rates, short and normal frames.
+    pub fn all() -> impl Iterator<Item = ModemMode> {
+        Modulation::ALL.into_iter().flat_map(|modulation| {
+            CodeRate::ALL.into_iter().flat_map(move |rate| [false, true].map(|normal| ModemMode { modulation, rate, normal }))
+        })
+    }
+
+    /// Bits per second of a frame's data over the frame's duration (as the original reports).
+    pub fn bitrate(self) -> f64 {
+        self.data_bits() as f64 / self.duration_s()
+    }
+
     /// The mode in the meta data's byte (bit 7, "analog", is not supported).
     pub fn from_byte(b: u8) -> Option<ModemMode> {
         if b & 0x80 != 0 {

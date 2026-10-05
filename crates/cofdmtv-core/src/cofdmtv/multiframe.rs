@@ -1,12 +1,14 @@
-//! Pictures larger than one payload (5380 bytes), sent as several frames with Cauchy
-//! Reed–Solomon erasure coding: any `blocks` of the frames sent rebuild the file, so
-//! frames lost to fading are made up for by sending a few extra.
+//! Files larger than one payload, sent as several frames with Cauchy Reed–Solomon erasure
+//! coding: any `blocks` of the frames sent rebuild the file, so frames lost to fading are
+//! made up for by sending a few extra.
 //!
 //! Each frame's payload starts with a 14-byte header — `"CRS"`, blocks − 1 (u16), the
 //! frame's ident (u16, ≥ blocks), file size − 1 (u24), CRC-32 of the file (u32), all
 //! little-endian — followed by the frame's coded block. The splitting is aicodix/crs
-//! `encode.cc` with 5380-byte chunks; the reassembly follows Assempix (`MainActivity`
-//! `decodePayload`, `crsec.hh`), which accepts up to 12 blocks (64392 bytes).
+//! `encode.cc` with chunks of the payload's size: 5380 bytes for COFDMTV pictures, where
+//! the reassembly follows Assempix (`MainActivity` `decodePayload`, `crsec.hh`, at most
+//! 12 blocks, 64392 bytes); a modem mode's datagram size for files over the modem (at
+//! most 1024 blocks, as `crs/encode` allows).
 
 use super::IMAGE_BYTES;
 use crate::coding::crc::{Crc32, POLY_DATA};
@@ -14,15 +16,19 @@ use crate::coding::crs;
 
 /// Header bytes of a frame.
 pub const OVERHEAD: usize = 3 + 2 + 2 + 3 + 4;
-/// File bytes one frame carries.
-pub const BLOCK_DATA: usize = (IMAGE_BYTES - OVERHEAD) & !1;
+/// File bytes one COFDMTV picture frame carries.
+pub const BLOCK_DATA: usize = block_data(IMAGE_BYTES);
 /// Most blocks Assempix accepts.
 pub const MAX_BLOCKS: usize = 12;
 /// Largest file Assempix accepts.
 pub const MAX_BYTES: usize = BLOCK_DATA * MAX_BLOCKS;
-/// Block length Assempix decodes with (`BLOCK_DATA` rounded up to the encoder's 64-byte
-/// SIMD alignment).
-const SLOT: usize = 5376;
+/// Most blocks `crs/encode` makes (files over the modem).
+pub const MAX_BLOCKS_ANY: usize = 1024;
+
+/// File bytes a frame of `chunk` payload bytes carries.
+pub const fn block_data(chunk: usize) -> usize {
+    (chunk - OVERHEAD) & !1
+}
 
 /// The header of a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,18 +57,35 @@ impl Header {
     }
 }
 
-/// Data blocks (frames needed) for a file of `size` bytes.
+/// Data blocks (frames needed) for a file of `size` bytes in COFDMTV picture frames.
 pub fn blocks_for(size: usize) -> usize {
-    size.div_ceil(BLOCK_DATA).max(1)
+    blocks_in(size, IMAGE_BYTES)
 }
 
-/// Split `file` into `frames` payloads of [`IMAGE_BYTES`] each (`frames` ≥
-/// [`blocks_for`]`(file.len())`; extra frames add redundancy).
+/// Data blocks for a file of `size` bytes in frames of `chunk` payload bytes.
+pub fn blocks_in(size: usize, chunk: usize) -> usize {
+    size.div_ceil(block_data(chunk)).max(1)
+}
+
+/// Split `file` into `frames` COFDMTV picture payloads ([`IMAGE_BYTES`] each; `frames` ≥
+/// [`blocks_for`]`(file.len())`, extra frames add redundancy), as Assempix accepts them.
 pub fn split(file: &[u8], frames: usize) -> Result<Vec<Vec<u8>>, String> {
-    if file.is_empty() || file.len() > MAX_BYTES {
-        return Err(format!("{} bytes: multi-frame files hold 1…{MAX_BYTES} bytes", file.len()));
+    if file.len() > MAX_BYTES {
+        return Err(format!("{} bytes: multi-frame pictures hold 1…{MAX_BYTES} bytes", file.len()));
     }
-    let blocks = blocks_for(file.len());
+    split_chunks(file, frames, IMAGE_BYTES)
+}
+
+/// Split `file` into `frames` payloads of `chunk` bytes (aicodix/crs `encode.cc`).
+pub fn split_chunks(file: &[u8], frames: usize, chunk: usize) -> Result<Vec<Vec<u8>>, String> {
+    if chunk <= OVERHEAD + 1 {
+        return Err(format!("{chunk}-byte frames are too small"));
+    }
+    let max = block_data(chunk) * MAX_BLOCKS_ANY;
+    if file.is_empty() || file.len() > max || file.len() > 1 << 24 {
+        return Err(format!("{} bytes: frames of {chunk} bytes hold files of 1…{} bytes", file.len(), max.min(1 << 24)));
+    }
+    let blocks = blocks_in(file.len(), chunk);
     if frames < blocks {
         return Err(format!("{} bytes need at least {blocks} frames", file.len()));
     }
@@ -83,7 +106,7 @@ pub fn split(file: &[u8], frames: usize) -> Result<Vec<Vec<u8>>, String> {
     for i in 0..frames {
         let ident = (blocks + i) as u16;
         crs::encode(&data, &mut block, ident, block_bytes);
-        let mut payload = vec![0u8; IMAGE_BYTES];
+        let mut payload = vec![0u8; chunk];
         payload[..3].copy_from_slice(b"CRS");
         payload[3..5].copy_from_slice(&((blocks - 1) as u16).to_le_bytes());
         payload[5..7].copy_from_slice(&ident.to_le_bytes());
@@ -116,33 +139,54 @@ pub enum Progress {
 }
 
 /// Collects frames of one file at a time (a frame of another file starts afresh).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Reassembler {
+    /// Payload bytes of a frame, and the most blocks accepted.
+    chunk: usize,
+    max_blocks: usize,
     current: Option<Header>,
     idents: Vec<u16>,
     slots: Vec<u8>,
 }
 
+impl Default for Reassembler {
+    /// For COFDMTV pictures, as Assempix accepts them.
+    fn default() -> Self {
+        Self::new(IMAGE_BYTES, MAX_BLOCKS)
+    }
+}
+
 impl Reassembler {
+    /// For frames of `chunk` payload bytes, files of at most `max_blocks` blocks.
+    pub fn new(chunk: usize, max_blocks: usize) -> Self {
+        Self { chunk, max_blocks, current: None, idents: Vec::new(), slots: Vec::new() }
+    }
+
+    /// Payload bytes of the frames this collects.
+    pub fn chunk(&self) -> usize {
+        self.chunk
+    }
+
     /// The file being collected and the frames in hand.
     pub fn state(&self) -> Option<(Header, usize)> {
         self.current.map(|h| (h, self.idents.len()))
     }
 
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self::new(self.chunk, self.max_blocks);
     }
 
     pub fn push(&mut self, payload: &[u8]) -> Progress {
         let Some(h) = Header::parse(payload) else { return Progress::NotMultiFrame };
-        if payload.len() < IMAGE_BYTES || h.blocks > MAX_BLOCKS || usize::from(h.ident) < h.blocks || h.size > MAX_BYTES {
+        let slot = block_data(self.chunk);
+        if payload.len() < self.chunk || h.blocks > self.max_blocks || usize::from(h.ident) < h.blocks || h.size > slot * h.blocks {
             return Progress::Unsupported;
         }
         let same = self.current.is_some_and(|c| c.blocks == h.blocks && c.size == h.size && c.crc == h.crc);
         if !same {
             self.current = Some(h);
             self.idents.clear();
-            self.slots = vec![0; h.blocks * SLOT];
+            self.slots = vec![0; h.blocks * slot];
         }
         if self.idents.contains(&h.ident) {
             return Progress::Duplicate;
@@ -150,19 +194,19 @@ impl Reassembler {
         if self.idents.len() == h.blocks {
             return Progress::Redundant;
         }
-        let at = self.idents.len() * SLOT;
-        self.slots[at..at + IMAGE_BYTES - OVERHEAD].copy_from_slice(&payload[OVERHEAD..IMAGE_BYTES]);
+        let at = self.idents.len() * slot;
+        self.slots[at..at + slot].copy_from_slice(&payload[OVERHEAD..OVERHEAD + slot]);
         self.idents.push(h.ident);
         if self.idents.len() < h.blocks {
             return Progress::Partial { have: self.idents.len(), need: h.blocks };
         }
-        let mut data = vec![0u8; h.blocks * SLOT];
-        crs::decode(&mut data, &self.slots, &self.idents, SLOT);
+        let mut data = vec![0u8; h.blocks * slot];
+        crs::decode(&mut data, &self.slots, &self.idents, slot);
         let copy = h.size.div_ceil(h.blocks);
         let mut file = Vec::with_capacity(h.size);
         for i in 0..h.blocks {
             let n = copy.min(h.size - file.len());
-            file.extend_from_slice(&data[i * SLOT..i * SLOT + n]);
+            file.extend_from_slice(&data[i * slot..i * slot + n]);
         }
         let mut crc = Crc32::new(POLY_DATA);
         if crc.bytes(&file) == h.crc {
@@ -213,5 +257,22 @@ mod tests {
         assert!(split(&vec![0; MAX_BYTES + 1], 13).is_err());
         assert!(split(&[1, 2, 3], 0).is_err());
         assert_eq!(r.push(&[0u8; IMAGE_BYTES]), Progress::NotMultiFrame);
+    }
+
+    #[test]
+    fn modem_sized_chunks() {
+        // QPSK 2/3 short frames hold 171 bytes (odd): 156 file bytes each.
+        let mut rng = Xorshift32::default();
+        let file: Vec<u8> = (0..2000).map(|_| rng.next() as u8).collect();
+        let blocks = blocks_in(file.len(), 171);
+        assert_eq!(blocks, 13);
+        let frames = split_chunks(&file, blocks + 2, 171).unwrap();
+        assert!(frames.iter().all(|f| f.len() == 171));
+        let mut r = Reassembler::new(171, MAX_BLOCKS_ANY);
+        let mut last = Progress::NotMultiFrame;
+        for f in frames.iter().rev().take(blocks) {
+            last = r.push(f);
+        }
+        assert_eq!(last, Progress::Complete(file));
     }
 }

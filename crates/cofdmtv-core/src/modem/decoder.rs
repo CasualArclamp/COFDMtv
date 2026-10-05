@@ -6,7 +6,7 @@
 //! tones) and the meta symbol is decoded straight from the buffer; then every symbol is
 //! taken as soon as it is complete — at the same sample positions as the original.
 
-use super::{BLOCK_LENGTH, MLS0_POLY, MLS0_SEED, MLS1_POLY, MLS2_POLY, ModemLayout, ModemMode, SEED_TONES, TONE_COUNT};
+use super::{BLOCK_LENGTH, MLS0_POLY, MLS0_SEED, MLS1_POLY, MLS2_POLY, ModemLayout, ModemMode, Modulation, SEED_TONES, TONE_COUNT};
 use crate::coding::crc::{Crc16, Crc32, POLY_DATA, POLY_META};
 use crate::coding::mls::Mls;
 use crate::coding::polar::CaScl;
@@ -116,8 +116,10 @@ pub struct ModemDecoder {
     perm: Vec<f32>,
     snr: Vec<f32>,
     codeword: Option<ModemCodeword>,
-    /// The last symbol's demodulated data tones (for a constellation display).
+    /// The last symbol's demodulated data tones (for a constellation display), and their
+    /// modulation.
     pub points: Vec<Cplx>,
+    points_modulation: Option<Modulation>,
 }
 
 impl ModemDecoder {
@@ -165,6 +167,7 @@ impl ModemDecoder {
             snr: Vec::new(),
             codeword: None,
             points: Vec::new(),
+            points_modulation: None,
         })
     }
 
@@ -206,6 +209,11 @@ impl ModemDecoder {
 
     pub fn take_codeword(&mut self) -> Option<ModemCodeword> {
         self.codeword.take()
+    }
+
+    /// The modulation of [`Self::points`].
+    pub fn last_modulation(&self) -> Option<Modulation> {
+        self.points_modulation
     }
 
     pub fn last_snr_db(&self) -> Option<f32> {
@@ -374,6 +382,7 @@ impl ModemDecoder {
         self.snr.push(precision);
         let precision = precision.min(1023.0);
         self.points.clear();
+        self.points_modulation = Modulation::ALL.into_iter().find(|m| m.bits() == mod_bits);
         for i in 0..TONE_COUNT {
             if i % BLOCK_LENGTH != seed_off {
                 let bits = super::tone_bits(mod_bits, self.k);

@@ -1,11 +1,12 @@
 //! The side panel: the latest (or chosen) picture large with what is known about it, a
-//! multi-frame picture in the making, and the gallery of pictures or the list of
-//! messages and pings.
+//! multi-frame picture or file in the making, and the gallery of pictures, the list of
+//! messages and pings, or the list of files (modem datagrams).
 
 use super::{Palette, heading, placeholder};
 use crate::receiver::{Message, RxSession};
 use crate::settings::SideTab;
 use eframe::egui::{self, RichText, Sense, Ui, vec2};
+use std::path::Path;
 
 pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
     let pal = Palette::for_ui(ui);
@@ -50,22 +51,16 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
             if p.frames > 1 {
                 facts.push(format!("{} frames", p.frames));
             }
-            facts.push(format!("mode {}", p.mode));
+            facts.push(p.label.clone());
             ui.label(RichText::new(facts.join(" · ")).weak());
-            ui.label(RichText::new(format!("SNR {:.1} dB · {} bits corrected · carrier {:.0} Hz", p.snr_db, p.flips, p.cfo_hz)).weak().small());
+            let mut signal = vec![format!("SNR {:.1} dB", p.snr_db)];
+            if let Some(f) = p.flips {
+                signal.push(format!("{f} bits corrected"));
+            }
+            signal.push(format!("carrier {:.0} Hz", p.cfo_hz));
+            ui.label(RichText::new(signal.join(" · ")).weak().small());
             if let Some(path) = &p.saved {
-                ui.horizontal(|ui| {
-                    if ui.small_button("Open").on_hover_text(path.display().to_string()).clicked() {
-                        let _ = open::that_detached(path);
-                    }
-                    if let Some(dir) = path.parent()
-                        && ui.small_button("Folder").on_hover_text(dir.display().to_string()).clicked()
-                    {
-                        let _ = open::that_detached(dir);
-                    }
-                    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                    ui.add(egui::Label::new(RichText::new(name).monospace().small().weak()).truncate());
-                });
+                ui.horizontal(|ui| saved_file(ui, path));
             }
         }
     }
@@ -73,7 +68,7 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
         ui.add_space(4.0);
         egui::Frame::group(ui.style()).corner_radius(egui::CornerRadius::same(4)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("Multi-frame picture from {}", m.call)).strong());
+            ui.label(RichText::new(format!("Multi-frame file from {}", m.call)).strong());
             ui.add(
                 egui::ProgressBar::new(m.have as f32 / m.need.max(1) as f32)
                     .desired_width(ui.available_width())
@@ -87,11 +82,27 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
     ui.horizontal(|ui| {
         ui.selectable_value(tab, SideTab::Pictures, format!("Pictures ({})", rx.pictures.len()));
         ui.selectable_value(tab, SideTab::Messages, format!("Messages ({texts})"));
+        ui.selectable_value(tab, SideTab::Files, format!("Files ({})", rx.files.len()));
     });
     match tab {
         SideTab::Pictures => gallery(ui, rx, &ctx),
         SideTab::Messages => messages(ui, rx, &pal),
+        SideTab::Files => files(ui, rx),
     }
+}
+
+/// Open and Folder buttons and the name of a saved file.
+fn saved_file(ui: &mut Ui, path: &Path) {
+    if ui.small_button("Open").on_hover_text(path.display().to_string()).clicked() {
+        let _ = open::that_detached(path);
+    }
+    if let Some(dir) = path.parent()
+        && ui.small_button("Folder").on_hover_text(dir.display().to_string()).clicked()
+    {
+        let _ = open::that_detached(dir);
+    }
+    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    ui.add(egui::Label::new(RichText::new(name).monospace().small().weak()).truncate());
 }
 
 /// Thumbnails, newest first; a click shows a picture large.
@@ -140,7 +151,7 @@ fn gallery(ui: &mut Ui, rx: &mut RxSession, ctx: &egui::Context) {
 /// Texts and pings, newest at the bottom.
 fn messages(ui: &mut Ui, rx: &RxSession, pal: &Palette) {
     if rx.messages.is_empty() {
-        placeholder(ui, "Text messages (Rattlegram) and pings received in this session.");
+        placeholder(ui, "Text messages (Rattlegram, or modem datagrams that read as text) and pings received in this session.");
         return;
     }
     egui::ScrollArea::vertical().id_salt("messages").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
@@ -150,7 +161,7 @@ fn messages(ui: &mut Ui, rx: &RxSession, pal: &Palette) {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(t.time.format("%H:%M:%S").to_string()).monospace().weak());
                         ui.label(RichText::new(&t.call).strong().color(pal.text));
-                        ui.label(RichText::new(format!("{:.0} dB", t.snr_db)).weak().small());
+                        ui.label(RichText::new(format!("{:.0} dB", t.snr_db)).weak().small()).on_hover_text(&t.label);
                     });
                     ui.add(egui::Label::new(RichText::new(&t.text).size(14.0)).wrap().selectable(true));
                     ui.add_space(4.0);
@@ -166,4 +177,35 @@ fn messages(ui: &mut Ui, rx: &RxSession, pal: &Palette) {
             }
         }
     });
+}
+
+/// Modem datagrams and files that are neither text nor pictures, newest at the bottom.
+fn files(ui: &mut Ui, rx: &RxSession) {
+    if rx.files.is_empty() {
+        placeholder(ui, "Files received in this session: modem datagrams that are not text, and files sent in frames (saved if \"Save to\" is on).");
+        return;
+    }
+    egui::ScrollArea::vertical().id_salt("files").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+        for f in &rx.files {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(f.time.format("%H:%M:%S").to_string()).monospace().weak());
+                ui.label(RichText::new(&f.call).strong());
+                let frames = if f.frames > 1 { format!(" in {} frames", f.frames) } else { String::new() };
+                ui.label(RichText::new(format!("{} bytes{frames}", f.data.len()))).on_hover_text(format!("{} · SNR {:.1} dB · carrier {:.0} Hz", f.label, f.snr_db, f.cfo_hz));
+            });
+            ui.horizontal(|ui| match &f.saved {
+                Some(path) => saved_file(ui, path),
+                None => {
+                    ui.label(RichText::new(preview(&f.data)).monospace().small().weak());
+                }
+            });
+            ui.add_space(4.0);
+        }
+    });
+}
+
+/// The first bytes in hex, for a file that was not saved.
+fn preview(data: &[u8]) -> String {
+    let hex: Vec<String> = data.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    format!("{}{}", hex.join(" "), if data.len() > 16 { " …" } else { "" })
 }
