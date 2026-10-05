@@ -1,0 +1,17 @@
+[package]
+name = "cofdmtv-core"
+description = "COFDMTV (images, text, ping) and aicodix modem datagrams: pure-Rust encoders and decoders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+num-complex.workspace = true
+rustfft.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# WAV files for the cross-check example and the fixtures of the compatibility tests.
+hound = "3.5.1"

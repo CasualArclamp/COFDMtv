@@ -1,0 +1,8 @@
+/target
+# Third-party sources (aicodix repositories) for the reference harness; never committed.
+/reference
+# Recordings and scratch output.
+/samples
+/out
+*.wav
+!/tests/fixtures/*.wav
