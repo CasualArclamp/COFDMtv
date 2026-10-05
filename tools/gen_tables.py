@@ -77,7 +77,7 @@ def main():
     out.append("/// all 37 glyphs after the other (`[char + 37 * row]`, MSB = leftmost pixel); from the")
     out.append("/// Terminus font (SIL Open Font License).")
     out.append(rust_array("BASE37_BITMAP", "u8", font, 37))
-    OUT.write_text("\n".join(out))
+    OUT.write_text("\n".join(out), newline="\n")
     print(f"wrote {OUT.relative_to(ROOT)}")
 
 

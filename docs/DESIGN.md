@@ -62,12 +62,37 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
   generated tables), `dsp/` (FFT, DC blocker, Hilbert, NCO, sliding buffers/sums,
   triggers, Theil–Sen, PAPR clipping), `cofdmtv/` (modes, sync, preamble, encoder,
   decoder, multi-frame).
+- `crates/cofdmtv-io` — DecDRM's `decdrm-io` without the audio player: WAV/FLAC reading
+  (symphonia) and writing (hound, flacenc), rubato resampling, cpal sound cards behind
+  lock-free ring buffers.
+- `crates/cofdmtv-engine` — worker threads: `Receiver` (source → decoder, spectrum,
+  level → snapshots and events; a second thread list-decodes payloads, rebuilds
+  multi-frame pictures and saves them as Assempix names them) and `Transmitter` (jobs →
+  encoder → sound card or file).
+- `crates/cofdmtv-pix` — pictures to send: EXIF orientation, scaling to Shredpix's pixel
+  budgets within Assempix's 16…1024 sides, JPEG/PNG/WebP (libwebp, vendored) at the
+  highest quality that fits; decoding received ones for display.
+- `apps/cofdmtv-cli` — `cofdmtv rx|tx picture|text|ping|devices`.
+
+## More choices
+
+- Sources at a rate the modems do not support are resampled to 48 kHz; the transmitter
+  builds the signal at the sound card's rate when it is a COFDMTV rate (else 48 kHz and
+  resamples), files at 48 kHz unless told otherwise.
+- At the end of a recording the receiver feeds half a second of silence, so that a
+  transmission at the very end is still found (the synchroniser looks two symbols back).
+- Multi-frame state is kept after a picture is complete (further frames of it are
+  "redundant", as in Assempix); a frame of another file starts afresh.
+- Received pictures are trimmed of the payload's zero padding by format (WebP by its RIFF
+  size, AVIF by its boxes, JPEG/PNG by the trailing zeros) before saving.
+- Live test (2026-10-05): CLI transmitter into VB-Audio cable A, CLI receiver on its
+  output: text and picture received intact.
 
 ## Milestones
 
 - [x] M0 — project, C++ reference harness, cross-check scripts.
 - [x] M1 — COFDMTV core: pictures, text, ping, multi-frame; cross-checked, fixtures.
-- [ ] M2 — audio I/O (sound cards, WAV), engine (worker threads), CLI.
+- [x] M2 — audio I/O (sound cards, WAV), engine (worker threads), pictures, CLI.
 - [ ] M3 — GUI receiver page (DecDRM look): sources, LED strip, spectrum, waterfall,
       constellation, received pictures/text, log.
 - [ ] M4 — GUI transmitter page: picture preparation (resize, JPEG/PNG/WebP fitted to the
