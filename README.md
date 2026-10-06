@@ -1,7 +1,9 @@
 # COFDMtv
 
-A desktop transceiver for the aicodix audio modems, in Rust, with the look of
-[DecDRM](https://github.com/CasualArclamp/DecDRM):
+A desktop transceiver, in Rust, for the audio modems Ahmet Inan builds at
+**[aicodix](https://www.aicodix.de)** ([github.com/aicodix](https://github.com/aicodix)),
+with the look of [DecDRM](https://github.com/CasualArclamp/DecDRM). It works with
+aicodix's own apps and programs:
 
 - **COFDMTV pictures** — send and receive images like the Android apps
   [Shredpix](https://github.com/aicodix/shredpix) and
@@ -18,7 +20,8 @@ A desktop transceiver for the aicodix audio modems, in Rust, with the look of
 
 ![COFDMtv receiving a recording: the spectrum, the waterfall with the call signs of two transmissions' fancy headers, the QPSK constellation, the picture received, and messages from Rattlegram and the modem](docs/images/receiver.png)
 
-![The transmitter after sending a picture in three frames: the original and the WebP as it will arrive, mode, carrier and lead-in, and the status panel with the output spectrum](docs/images/transmitter.png)
+*Receiving a recording: a modem text, a Rattlegram text and a picture in mode 12. The
+call signs DK2XYZ and DL1ABC are the fancy headers, drawn into the waterfall.*
 
 COFDMTV is OFDM with 160 ms symbols (6.25 Hz carrier spacing) and a 1/8 guard interval,
 differentially PSK modulated, protected by systematic polar codes with a CRC — see
@@ -29,6 +32,13 @@ The modems are ports of the original C++, checked against it in both directions:
 picture and text mode, every sample rate, multi-frame pictures, and all 64 modem modes
 decode in COFDMtv from the originals' signals and in the originals from COFDMtv's, and
 COFDMtv's signals equal the originals' sample by sample.
+
+## Download
+
+For Windows 10 and 11 (64-bit): `cofdmtv-gui.exe` (the desktop app) and `cofdmtv.exe`
+(the command line) from the [latest release](https://github.com/CasualArclamp/COFDMtv/releases/latest).
+Each is a single file with nothing to install. They are not signed, so Windows SmartScreen
+may warn the first time ("More info" → "Run anyway"). On Linux, build from source (below).
 
 ## The program
 
@@ -45,6 +55,24 @@ COFDMtv's signals equal the originals' sample by sample.
   preview of how it will arrive), a text, a ping, or data over the modem (a text or any
   file); mode, carrier, lead-in and fancy header; to a sound card or a WAV/FLAC file,
   mono, one channel or I/Q.
+
+<p>
+  <img src="docs/images/modem.png" width="49%" alt="A picture arriving over the aicodix modem in six QAM256 frames: the spectrum, the waterfall, the QAM256 constellation building up, the picture and a text message">
+  <img src="docs/images/transmitter-data.png" width="49%" alt="The transmitter's Data page: a 10594-byte picture file in seven QAM256 1/2 normal frames at 1500 Hz, with the output spectrum">
+</p>
+
+*Left: a picture arriving over the aicodix modem in six QAM256 frames. Right: sending it,
+seven frames of which any six rebuild the file.*
+
+![The payload constellation building up for QAM16, QAM64, QAM256 and QAM1024](docs/images/constellations.png)
+
+*The constellation builds up over the last symbols, a dozen for every point: QAM16,
+QAM64, QAM256 and QAM1024 from the modem over a clean link (about 39 dB Es/N0). Scroll
+to zoom in, drag to move, double-click to see it all.*
+
+![The transmitter after sending a picture in three frames: the original and the WebP as it will arrive, mode, carrier and lead-in, and the status panel with the output spectrum](docs/images/transmitter.png)
+
+*Sending a picture in three frames: the original and the WebP as it will arrive.*
 
 Drop a recording on the window to receive it, a picture to send it, any other file to
 send it as data. Settings are kept in `%APPDATA%\cofdmtv\gui.toml` (Windows) or
@@ -89,10 +117,21 @@ the aicodix repositories by `tools/cxx-reference/build.sh` (see `docs/DESIGN.md`
 
 ## Credits and license
 
-The modems are ports of Ahmet Inan's aicodix C++ code (BSD Zero Clause License): DSP and
-coding from [aicodix/dsp](https://github.com/aicodix/dsp) and
-[aicodix/code](https://github.com/aicodix/code), the signals from the apps and the modem
-above. The fancy header font is from Terminus (SIL Open Font License). The GUI and audio
-code come from DecDRM.
+COFDMtv stands on Ahmet Inan's work at [aicodix](https://www.aicodix.de)
+([github.com/aicodix](https://github.com/aicodix)); its modems are ports of his C++ (BSD
+Zero Clause License):
+
+- the COFDMTV signal from [Shredpix](https://github.com/aicodix/shredpix),
+  [Assempix](https://github.com/aicodix/assempix) and
+  [Rattlegram](https://github.com/aicodix/rattlegram), described at
+  [aicodix.de/cofdmtv](https://www.aicodix.de/cofdmtv/);
+- the [aicodix modem](https://github.com/aicodix/modem);
+- DSP and coding from [aicodix/dsp](https://github.com/aicodix/dsp) and
+  [aicodix/code](https://github.com/aicodix/code), and multi-frame files as
+  [aicodix/crs](https://github.com/aicodix/crs) makes them;
+- the impaired test channels come from [aicodix/disorders](https://github.com/aicodix/disorders).
+
+The fancy header font is from Terminus (SIL Open Font License). The GUI and audio code
+come from [DecDRM](https://github.com/CasualArclamp/DecDRM).
 
 COFDMtv is licensed under the GNU General Public License, version 2 or later.
