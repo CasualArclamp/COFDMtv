@@ -19,11 +19,13 @@ pub struct Partial {
     pub image: RgbaImage,
     /// Rows decoded, from the top.
     pub rows: u32,
+    /// A progressive JPEG: once all rows are in it goes on getting sharper.
+    pub progressive: bool,
 }
 
 impl Partial {
     fn empty(width: u32, height: u32) -> Option<Partial> {
-        (width > 0 && height > 0).then(|| Partial { image: RgbaImage::new(width, height), rows: 0 })
+        (width > 0 && height > 0).then(|| Partial { image: RgbaImage::new(width, height), rows: 0, progressive: false })
     }
 }
 
@@ -66,7 +68,7 @@ fn webp_rows(head: &[u8]) -> Option<Partial> {
             for (y, out) in image.chunks_exact_mut(4 * w).take(rows).enumerate() {
                 out.copy_from_slice(std::slice::from_raw_parts(rgba.add(y * stride as usize), 4 * w));
             }
-            Partial { image, rows: rows as u32 }
+            Partial { image, rows: rows as u32, progressive: false }
         });
         WebPIDelete(idec);
         out
@@ -87,13 +89,38 @@ const MCU_ROWS: u32 = 16;
 fn jpeg_rows(head: &[u8]) -> Option<Partial> {
     let decode = |bytes: &[u8]| image::load_from_memory_with_format(bytes, ImageFormat::Jpeg).ok();
     // Cut short within the tables or the header of a progressive JPEG's next scan, it
-    // decodes up to the scans before.
-    let mut image = decode(head).or_else(|| decode(before_last_segment(head)?))?.to_rgba8();
+    // decodes up to the scans before; in the last bytes of a scan, a little less of it does.
+    let mut image = decode(head)
+        .or_else(|| decode(before_last_segment(head)?))
+        .or_else(|| [16, 64, 256].into_iter().find_map(|less| decode(&head[..head.len().checked_sub(less)?])))?
+        .to_rgba8();
     let (w, h) = image.dimensions();
-    let gray = image.rows().rev().take_while(|row| row.clone().all(|p| p.0 == [128, 128, 128, 255])).count() as u32;
-    let rows = if gray == 0 { h } else { (h - gray).saturating_sub(MCU_ROWS) };
+    let fill = |p: &image::Rgba<u8>| p.0 == [128, 128, 128, 255];
+    let gray = image.rows().rev().take_while(|row| row.clone().all(fill)).count() as u32;
+    // The bytes ran out in the last row of blocks: the right of it is still gray.
+    let gray_tail = image.rows().last().map_or(0, |row| row.rev().take_while(|&p| fill(p)).count());
+    let rows = match gray {
+        0 if gray_tail < 8 => h,
+        0 => h.saturating_sub(MCU_ROWS),
+        _ => (h - gray).saturating_sub(MCU_ROWS),
+    };
     image.as_mut()[(rows * w * 4) as usize..].fill(0);
-    Some(Partial { image, rows })
+    Some(Partial { image, rows, progressive: is_progressive_jpeg(head) })
+}
+
+/// The JPEG's frame header says progressive DCT (SOF2), found by walking the marker
+/// segments before it.
+fn is_progressive_jpeg(head: &[u8]) -> bool {
+    let mut at = 2;
+    while at + 4 <= head.len() && head[at] == 0xFF {
+        match head[at + 1] {
+            0xC2 => return true,
+            // Other frame headers, or the first scan: not progressive.
+            0xC0 | 0xC1 | 0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF | 0xDA => return false,
+            _ => at += 2 + usize::from(u16::from_be_bytes([head[at + 2], head[at + 3]])),
+        }
+    }
+    false
 }
 
 /// `head` up to the last marker segment that can come between two scans (DHT, SOS, DQT,
@@ -197,6 +224,7 @@ mod tests {
     fn jpeg_and_png_arrive_from_the_top() {
         let img = test_image(320, 240);
         let jpeg = encode_at(&img, Format::Jpeg, 90).unwrap();
+        assert!(!decode_partial(&jpeg[..jpeg.len() / 2]).unwrap().progressive);
         // Chroma upsampling reaches a row into what has not arrived.
         let rows = grows(&jpeg, 2);
         assert!(rows[5] > 0 && rows[5] < 240, "JPEG: {rows:?}");
@@ -213,19 +241,23 @@ mod tests {
             let sq: f64 = p.image.as_raw().iter().zip(full.as_raw()).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
             (sq / full.as_raw().len() as f64).sqrt()
         };
-        // Every cut after the frame header decodes, the whole picture once the first scan
-        // is in, closer to the whole file's the more there is.
-        let (mut whole_from, mut last) = (None, f64::MAX);
-        for n in (700..=file.len()).step_by(41).chain([file.len()]) {
+        // Every cut into the first scan shows something (also within the tables and scan
+        // headers between scans), and the whole picture once that scan is in. (A cut in its
+        // very last bytes may leave a few wrong blocks at the bottom for that frame.)
+        let first_scan = file.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+        let mut whole_from = None;
+        for n in (first_scan + 40..=file.len()).step_by(7) {
             let p = decode_partial(&file[..n]).unwrap_or_else(|| panic!("{n} bytes"));
+            assert!(p.progressive && p.rows > 0, "{n} bytes: {} rows", p.rows);
             if p.rows == full.height() {
                 whole_from.get_or_insert(n);
-                let e = error(&p);
-                assert!(e <= last + 1.0, "{n} bytes: {e} after {last}");
-                last = e;
             }
         }
         assert!(whole_from.unwrap() < file.len() / 3, "{whole_from:?} of {}", file.len());
+        // Sharper with every quarter.
+        let errors: Vec<f64> = [1, 2, 3, 4].iter().map(|q| error(&decode_partial(&file[..file.len() * q / 4]).unwrap())).collect();
+        assert!(errors.windows(2).all(|w| w[1] < w[0]), "{errors:?}");
+        let last = errors[3];
         assert!(last < 0.5, "{last}");
     }
 

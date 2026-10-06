@@ -1,8 +1,9 @@
 //! Pictures for COFDMTV, as Shredpix prepares them and Assempix shows them.
 //!
 //! A picture to send is scaled to at most a number of pixels (Shredpix's "1M" … "16K"
-//! choices; each side 16…1024 pixels, which Assempix requires) and compressed — JPEG,
-//! PNG, or WebP lossy/lossless — with the highest quality that fits the byte budget: one
+//! choices; each side 16…1024 pixels, which Assempix requires) and compressed — JPEG
+//! (baseline, or progressive for v2 pictures), PNG, or WebP lossy/lossless — with the
+//! highest quality that fits the byte budget: one
 //! payload (5380 bytes), or the blocks of a multi-frame transmission. A file that already
 //! fits is sent unchanged. A picture still arriving is decoded as far as it has come
 //! ([`decode_partial`]).
@@ -26,23 +27,26 @@ pub enum Format {
     WebpLossy,
     WebpLossless,
     Jpeg,
+    /// The whole picture coarse first, then sharper: for v2 pictures, which arrive in order.
+    JpegProgressive,
     Png,
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::WebpLossy, Format::Jpeg, Format::WebpLossless, Format::Png];
+    pub const ALL: [Format; 5] = [Format::WebpLossy, Format::Jpeg, Format::JpegProgressive, Format::WebpLossless, Format::Png];
 
     pub fn label(self) -> &'static str {
         match self {
             Format::WebpLossy => "WebP",
             Format::WebpLossless => "WebP lossless",
             Format::Jpeg => "JPEG",
+            Format::JpegProgressive => "progressive JPEG",
             Format::Png => "PNG",
         }
     }
 
     pub fn is_lossy(self) -> bool {
-        matches!(self, Format::WebpLossy | Format::Jpeg)
+        matches!(self, Format::WebpLossy | Format::Jpeg | Format::JpegProgressive)
     }
 }
 
@@ -163,9 +167,32 @@ pub fn encode_at(img: &RgbImage, format: Format, quality: u8) -> Result<Vec<u8>,
                 .map_err(|e| e.to_string())?;
             Ok(out)
         }
+        Format::JpegProgressive => progressive_jpeg(img, quality.clamp(1, 100)),
         Format::WebpLossy => Ok(webp::Encoder::from_rgb(img.as_raw(), w, h).encode(f32::from(quality.clamp(0, 100))).to_vec()),
         Format::WebpLossless => Ok(webp::Encoder::from_rgb(img.as_raw(), w, h).encode_lossless().to_vec()),
     }
+}
+
+/// A progressive JPEG by mozjpeg (trellis quantisation, 4:2:0), with libjpeg's standard
+/// progression: the DC of all components first, at reduced precision — the whole picture,
+/// coarse, after a fifth of the file or so — then the AC bands and their refinements.
+/// mozjpeg's own size-optimised scans end a little sharper (0.3–1.5 dB at 12 kB) but keep
+/// the picture coarse for longer (a photo at 40 % of its bytes: 30 dB rather than 33.5).
+fn progressive_jpeg(img: &RgbImage, quality: u8) -> Result<Vec<u8>, String> {
+    // libjpeg reports errors by unwinding (a panic through its C code).
+    std::panic::catch_unwind(|| {
+        let mut c = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
+        c.set_size(img.width() as usize, img.height() as usize);
+        // (Clears the scan script, so before the progression is set.)
+        c.set_optimize_scans(false);
+        c.set_progressive_mode();
+        c.set_quality(f32::from(quality));
+        let mut started = c.start_compress(Vec::new())?;
+        started.write_scanlines(img.as_raw())?;
+        started.finish()
+    })
+    .map_err(|_| "the JPEG encoder failed".to_string())?
+    .map_err(|e| e.to_string())
 }
 
 /// Compress with the highest quality whose file fits `budget` bytes (bisection over
@@ -265,6 +292,18 @@ mod tests {
             assert_eq!(back.dimensions(), (320, 240));
         }
         assert!(encode_to_fit(&test_image(1024, 1024), Format::Png, 5380).is_err());
+    }
+
+    #[test]
+    fn progressive_jpeg_fits_and_comes_coarse_first() {
+        let img = test_image(320, 240);
+        let e = encode_to_fit(&img, Format::JpegProgressive, 9000).unwrap();
+        assert!(e.bytes.len() <= 9000);
+        // Start of frame 2: progressive DCT.
+        assert!(e.bytes.windows(2).any(|w| w == [0xFF, 0xC2]), "progressive");
+        assert_eq!(decode(&e.bytes).expect("decodes").dimensions(), (320, 240));
+        let half = decode_partial(&e.bytes[..e.bytes.len() / 2]).unwrap();
+        assert!(half.progressive && half.rows == 240, "the whole picture at half the file");
     }
 
     #[test]

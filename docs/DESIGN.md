@@ -59,6 +59,34 @@ modes — maybe we will call these v2 modes." Asked how, the user chose:
   frames only: shown when complete); 0.1.3 and 0.1.4 do not receive the new ones (they
   reject the data-block frames, as Assempix does).
 
+Then: "Is it possible like JPEG 2000, where you get the whole image at the start but it
+gets more high resolution the more loads in — or would this break compatibility with the
+phone app?" It cannot touch the phone app: Assempix never decodes v2 (modem) frames, and
+for its own modes nothing shows before the end anyway (a JPEG 2000 file would break it —
+Android cannot decode one; a progressive JPEG would not, but appears all at once there).
+Measured at the same size (640×360 photo / the 640×480 test card, PSNR):
+
+| 12 kB | Final | What shows first |
+|---|---|---|
+| WebP | 39.9 / 41.0 dB | rows from the top, after 15–25 % of the file |
+| progressive JPEG, mozjpeg | 38.2 / 37.5 dB | the whole picture, blocky, after ~20 %; 33.5 dB (photo) at 40 % |
+| progressive JPEG, jpeg-encoder | 37.4 / 35.8 dB | the same, coarser for longer (30.0 dB at 40 %) |
+| JPEG 2000, OpenJPEG | 36.9 / 32.5 dB | the whole picture, blurry |
+| WebP after a 1/8-size preview | 39.9 / 41.1 dB | the whole picture, blurred, then sharp rows |
+
+The user chose (2026-10-06) **a progressive JPEG option**: JPEG in a v2 mode is a
+progressive JPEG; WebP stays the default. The encoder is mozjpeg (C, built with cc like
+libwebp, without its NASM SIMD) with libjpeg's standard progression (the DC of all
+components first at reduced precision, then the AC bands and refinements) and trellis
+quantisation. mozjpeg's size-optimised scans end a little sharper (12 kB: +0.3 dB on the
+photo, +1.5 dB on the test card) but keep the picture coarse for longer (at 40 % of the
+bytes 29.8 rather than 33.5 dB on the photo). jpeg-encoder (pure Rust) writes an
+end-of-block code for every block in every AC scan (no end-of-band runs), some 7200 per
+scan at 640×480, which costs more the more scans. The
+receiver shows a progressive JPEG whole once its first scan is in ("sharpening, 38 % in");
+cuts inside the tables and scan headers between scans decode up to the scans before, cuts
+in a scan's last bytes a little less of it.
+
 ## Choices made while building
 
 - **Pure Rust port** of the C++ (aicodix, BSD Zero Clause License), as DecDRM ported Dream:
@@ -257,7 +285,11 @@ A picture in aicodix modem frames (`cofdmtv_engine::v2`):
   gap; beginnings of WebP (lossy, lossless), JPEG and PNG decoded as far as they go, the
   same as the whole file there and transparent below; an engine round trip with the third
   frame lost; the CLI (`rows in`, also in the smoke test) and the GUI receiving a v2
-  recording in real time (screenshots at 13, 17 and 21 s of 29).
+  recording in real time (screenshots at 13, 17 and 21 s of 29). Progressive JPEGs: every
+  cut of a fixture from the first scan on shows rows, the whole picture before a third
+  of the file, sharper with every quarter; mozjpeg's output fits the budget and decodes;
+  the CLI and the GUI receiving one in real time (whole from frame 3 of 13); a smoke-test
+  case.
 
 ## Milestones
 
@@ -283,4 +315,5 @@ A picture in aicodix modem frames (`cofdmtv_engine::v2`):
       terminal.
 - [x] M8 — v2 pictures shown as they arrive: systematic v2 frames (the picture first, in
       order), beginnings of WebP/JPEG/PNG decoded as far as they go, the GUI shows the
-      picture from the top, the CLI the rows in.
+      picture from the top, the CLI the rows in; JPEG in v2 is progressive (mozjpeg), so
+      such a picture arrives whole and coarse first, then sharper.

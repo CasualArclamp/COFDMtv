@@ -24,7 +24,7 @@ use cofdmtv_engine::cofdmtv_core::cofdmtv::{IMAGE_BYTES, Mode, RATES, SYMBOL_SEC
 use cofdmtv_engine::cofdmtv_core::modem::{self, CodeRate, ModemMode, ModemRequest, Modulation, transmission_seconds};
 use cofdmtv_engine::receiver::cofdmtv_bandwidth;
 use cofdmtv_engine::{OutputSpec, TxConfig, TxJob, v2};
-use cofdmtv_pix::{PIXEL_CHOICES, Source};
+use cofdmtv_pix::{Format, PIXEL_CHOICES, Source};
 use eframe::egui::{self, Color32, ColorImage, ComboBox, RichText, TextureHandle, TextureOptions, Ui};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ use std::sync::mpsc;
 #[derive(Debug, Clone, PartialEq)]
 struct PrepKey {
     generation: u64,
-    format: PicFormat,
+    format: Format,
     pixels: Pixels,
     /// Bytes the picture may have.
     budget: usize,
@@ -166,7 +166,7 @@ impl TxPage {
     }
 
     fn key(&self, settings: &Settings) -> PrepKey {
-        PrepKey { generation: self.generation, format: settings.format, pixels: settings.pixels, budget: picture_budget(settings), as_is: settings.send_as_is }
+        PrepKey { generation: self.generation, format: picture_format(settings, settings.format), pixels: settings.pixels, budget: picture_budget(settings), as_is: settings.send_as_is }
     }
 
     /// A picture is being prepared (or about to be): Transmit has to wait.
@@ -226,7 +226,7 @@ fn prepare(src: &Source, key: &PrepKey) -> Result<PrepResult, String> {
         let info = format!("sent as it is: {w}×{h}, {} bytes", o.len());
         return Ok(PrepResult { file: o.to_vec(), info, preview: preview_of(o) });
     }
-    let format = key.format.format();
+    let format = key.format;
     let (pixels, e) = match key.pixels {
         Pixels::Auto => cofdmtv_pix::encode_auto(&src.image, format, budget, 1 << 20, 50)?,
         Pixels::Max(p) => (p, cofdmtv_pix::encode_to_fit(&cofdmtv_pix::scale(&src.image, p), format, budget)?),
@@ -235,6 +235,15 @@ fn prepare(src: &Source, key: &PrepKey) -> Result<PrepResult, String> {
     let budget_name = PIXEL_CHOICES.iter().find(|(p, _)| *p == pixels).map_or(String::new(), |(_, n)| format!(" (≤ {n} pixels)"));
     let info = format!("{}×{} {}{quality}, {} bytes{budget_name}", e.width, e.height, format.label(), e.bytes.len());
     Ok(PrepResult { preview: preview_of(&e.bytes), file: e.bytes, info })
+}
+
+/// How a picture in format `f` is compressed: JPEG is progressive in a v2 mode, whose
+/// frames carry the picture in order, so that it arrives whole and coarse first.
+fn picture_format(settings: &Settings, f: PicFormat) -> Format {
+    match f {
+        PicFormat::Jpeg if settings.picture_v2 => Format::JpegProgressive,
+        f => f.format(),
+    }
 }
 
 fn preview_of(bytes: &[u8]) -> Option<ColorImage> {
@@ -504,10 +513,15 @@ impl TxPage {
         });
         ui.add_space(6.0);
         grid(ui, "picture_settings", |ui| {
-            row_label(ui, "Format");
-            ComboBox::from_id_salt("pic_format").selected_text(settings.format.label()).show_ui(ui, |ui| {
+            row_label(ui, "Format").on_hover_text(if settings.picture_v2 {
+                "How the picture arrives: a WebP from the top down; a progressive JPEG whole and coarse first, then sharper (a little softer for the same air time)"
+            } else {
+                "WebP gives the best picture for the bytes; JPEG and PNG are what older receivers take"
+            });
+            ComboBox::from_id_salt("pic_format").selected_text(picture_format(settings, settings.format).label()).show_ui(ui, |ui| {
                 for f in PicFormat::ALL {
-                    ui.selectable_value(&mut settings.format, f, f.label());
+                    let label = picture_format(settings, f).label();
+                    ui.selectable_value(&mut settings.format, f, label);
                 }
             });
             ui.end_row();

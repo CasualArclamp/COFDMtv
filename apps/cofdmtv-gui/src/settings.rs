@@ -238,10 +238,6 @@ impl PicFormat {
             Self::Png => cofdmtv_pix::Format::Png,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        self.format().label()
-    }
 }
 
 /// Pixel budget of the picture to send: automatic, or one of Shredpix's.

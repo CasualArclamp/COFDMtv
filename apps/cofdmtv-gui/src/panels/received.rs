@@ -101,8 +101,9 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
 fn arriving_picture(ui: &mut Ui, a: &mut Arriving, m: Option<&MultiFrame>, ctx: &egui::Context, pal: &Palette, max_h: f32) {
     let width = ui.available_width();
     let mut facts = vec![a.kind.map_or("picture", |k| k.name()).to_string()];
+    let bytes = a.bytes();
     match a.texture(ctx) {
-        Some((tex, rows)) => {
+        Some((tex, rows, progressive)) => {
             let size = tex.size_vec2();
             let scale = (width / size.x).min(max_h / size.y).min(4.0);
             ui.vertical_centered(|ui| {
@@ -115,7 +116,11 @@ fn arriving_picture(ui: &mut Ui, a: &mut Arriving, m: Option<&MultiFrame>, ctx: 
                 }
             });
             facts.push(format!("{}×{}", size.x, size.y));
-            facts.push(format!("{} of {} rows", rows, size.y));
+            match m {
+                // A progressive JPEG: whole, and sharper with every frame.
+                Some(m) if progressive && rows as f32 >= size.y => facts.push(format!("sharpening, {}% in", bytes * 100 / m.size.max(1))),
+                _ => facts.push(format!("{} of {} rows", rows, size.y)),
+            }
         }
         None => placeholder(ui, "A picture is arriving; it shows once its header is in."),
     }

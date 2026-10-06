@@ -114,8 +114,9 @@ pub struct Arriving {
     head: Vec<u8>,
     /// `head` came after the texture was made.
     stale: bool,
-    /// The picture so far (transparent where it has not arrived) and the rows decoded.
-    shown: Option<(TextureHandle, u32)>,
+    /// The picture so far (transparent where it has not arrived), the rows decoded, and
+    /// whether it sharpens once they are all in (a progressive JPEG).
+    shown: Option<(TextureHandle, u32, bool)>,
 }
 
 impl Arriving {
@@ -129,25 +130,30 @@ impl Arriving {
         self.stale = true;
     }
 
-    /// The picture so far and the rows decoded, decoding what came since the last call;
-    /// `None` until its header is in.
-    pub fn texture(&mut self, ctx: &egui::Context) -> Option<(&TextureHandle, u32)> {
+    /// Bytes of it in hand.
+    pub fn bytes(&self) -> usize {
+        self.head.len()
+    }
+
+    /// The picture so far, the rows decoded and whether it sharpens further, decoding what
+    /// came since the last call; `None` until its header is in.
+    pub fn texture(&mut self, ctx: &egui::Context) -> Option<(&TextureHandle, u32, bool)> {
         if std::mem::take(&mut self.stale)
             && let Some(p) = cofdmtv_pix::decode_partial(&self.head)
             // Less than before (a cut no decoder takes): keep what is shown.
-            && self.shown.as_ref().is_none_or(|(_, rows)| p.rows >= *rows)
+            && self.shown.as_ref().is_none_or(|(_, rows, _)| p.rows >= *rows)
         {
             let size = [p.image.width() as usize, p.image.height() as usize];
             let image = ColorImage::from_rgba_unmultiplied(size, p.image.as_raw());
             match &mut self.shown {
-                Some((tex, rows)) if tex.size() == size => {
+                Some((tex, rows, progressive)) if tex.size() == size => {
                     tex.set(image, TextureOptions::LINEAR);
-                    *rows = p.rows;
+                    (*rows, *progressive) = (p.rows, p.progressive);
                 }
-                _ => self.shown = Some((ctx.load_texture("arriving", image, TextureOptions::LINEAR), p.rows)),
+                _ => self.shown = Some((ctx.load_texture("arriving", image, TextureOptions::LINEAR), p.rows, p.progressive)),
             }
         }
-        self.shown.as_ref().map(|(t, rows)| (t, *rows))
+        self.shown.as_ref().map(|(t, rows, progressive)| (t, *rows, *progressive))
     }
 }
 

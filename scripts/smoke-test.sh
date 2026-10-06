@@ -58,6 +58,12 @@ echo "== v2 picture: QAM64 1/2 normal frames, lead-in, fancy header, an extra fr
 grep -E "CI1/TEST  picture, v2 QAM64 1/2 normal: 5345 bytes, JPEG" "$out/rx_v2.txt"
 # Shown as it arrives: the first frames carry the picture itself.
 grep -E "CI1/TEST +frame 2 of 3 \(5345 bytes, [0-9]+ of 240 rows in\)" "$out/rx_v2.txt"
+
+echo "== v2 picture as a progressive JPEG: whole and coarse first, then sharper"
+"$bin/cofdmtv" tx picture "$fixtures/testcard.jpg" --v2 --format jpeg --recompress --modulation qam64 --frame short --air-time 15 --call CI1/TEST -o v2_progressive.wav
+"$bin/cofdmtv" rx v2_progressive.wav --out-dir v2p_received | tee "$out/rx_v2_progressive.txt"
+grep -E "CI1/TEST +frame [0-9]+ of [0-9]+ \([0-9]+ bytes, the whole picture, [0-9]+% in\)" "$out/rx_v2_progressive.txt"
+grep -E "CI1/TEST  picture, v2 QAM64 1/2 short: [0-9]+ bytes, JPEG in [0-9]+ frames" "$out/rx_v2_progressive.txt"
 cmp v2_received/*.jpg "$fixtures/testcard.jpg"
 
 echo "== GUI: receive the picture file, screenshot"

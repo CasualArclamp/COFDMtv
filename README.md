@@ -19,7 +19,8 @@ aicodix's own apps and programs:
   up for lost ones;
 - **v2 picture modes** — pictures in modem frames of any modulation and code rate, with
   COFDMTV's lead-in and fancy header and extra frames, compressed to fill the air time you
-  set, and shown from the top as the frames arrive (COFDMtv to COFDMtv).
+  set, and shown as the frames arrive: a WebP from the top down, a progressive JPEG whole
+  and coarse first, then sharper (COFDMtv to COFDMtv).
 
 ![COFDMtv receiving a recording: the spectrum, the waterfall with the call signs of two transmissions' fancy headers, the QPSK constellation, the picture received, and messages from Rattlegram and the modem](docs/images/receiver.png)
 
@@ -82,6 +83,13 @@ drawn into the waterfall after them (right).*
 receiver shows it from the top as they come — here four of nine frames in. The extra
 frame, coded, makes up for one lost.*
 
+![A v2 picture sent as a progressive JPEG, three times as it arrives: whole but blocky with 23 % in, sharper at 38 %, nearly as sent at 76 %](docs/images/v2-progressive-jpeg.png)
+
+*Choose JPEG for a v2 picture and it goes as a progressive JPEG: the whole picture comes
+first, blocky, then sharper with every frame (here with 23, 38 and 76 % in). A WebP
+gives the better picture for the same air time; a progressive JPEG shows all of it
+sooner.*
+
 ![The payload constellation building up for QAM16, QAM64, QAM256 and QAM1024](docs/images/constellations.png)
 
 *The constellation builds up over the last symbols, a dozen for every point: QAM16,
@@ -115,7 +123,7 @@ cofdmtv devices
 ## Building
 
 You need Rust 1.88 or later ([rustup.rs](https://rustup.rs), or your distribution's `rust`
-package if it is that recent) and a C compiler, for libwebp.
+package if it is that recent) and a C compiler, for libwebp and mozjpeg.
 
 ### Linux
 
@@ -176,6 +184,8 @@ Zero Clause License):
 - the impaired test channels come from [aicodix/disorders](https://github.com/aicodix/disorders).
 
 The fancy header font is from Terminus (SIL Open Font License). The GUI and audio code
-come from [DecDRM](https://github.com/CasualArclamp/DecDRM).
+come from [DecDRM](https://github.com/CasualArclamp/DecDRM). Pictures are compressed with
+libwebp and, for progressive JPEGs, [mozjpeg](https://github.com/mozilla/mozjpeg): this
+software is based in part on the work of the Independent JPEG Group.
 
 COFDMtv is licensed under the GNU General Public License, version 2 or later.

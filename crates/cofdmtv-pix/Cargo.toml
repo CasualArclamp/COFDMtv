@@ -17,3 +17,7 @@ webp = { version = "0.3.1", default-features = false }
 libwebp-sys = "0.9.6"
 # PNG row by row, for the same (as image uses it).
 png = "0.18.1"
+# Progressive JPEG (v2 pictures arrive whole and coarse first): mozjpeg, compiled from its C
+# sources with cc like libwebp (without its NASM SIMD). Based in part on the work of the
+# Independent JPEG Group (credited in the README).
+mozjpeg = { version = "0.10.13", default-features = false }

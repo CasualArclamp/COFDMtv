@@ -122,7 +122,8 @@ struct PictureArgs {
     /// Seconds a v2 picture may take on the air.
     #[arg(long, default_value_t = 30.0, requires = "v2")]
     air_time: f64,
-    /// Compression.
+    /// Compression (with --v2, jpeg is a progressive JPEG: it arrives whole and coarse
+    /// first, then sharper; a WebP arrives from the top down).
     #[arg(long, value_enum, default_value_t = PicFormat::Webp)]
     format: PicFormat,
     /// Most pixels: 1M, 512K, 256K, 128K, 64K, 32K, 16K, or auto (the largest that keeps a
@@ -355,8 +356,14 @@ fn rx(a: RxArgs) -> Result<()> {
                 RxEvent::Ping { call, cfo_hz } => println!("{:<9} ping at {cfo_hz:.0} Hz", call),
                 RxEvent::MultiFrame { call, have, need, size, head, .. } => {
                     // A picture arriving in order (v2): how much of it is in.
-                    let rows = cofdmtv_pix::decode_partial(&head).map_or(String::new(), |p| format!(", {} of {} rows in", p.rows, p.image.height()));
-                    println!("{call:<9} frame {have} of {need} ({size} bytes{rows})");
+                    let shown = cofdmtv_pix::decode_partial(&head).map_or(String::new(), |p| {
+                        if p.progressive && p.rows == p.image.height() {
+                            format!(", the whole picture, {}% in", head.len() * 100 / size.max(1))
+                        } else {
+                            format!(", {} of {} rows in", p.rows, p.image.height())
+                        }
+                    });
+                    println!("{call:<9} frame {have} of {need} ({size} bytes{shown})");
                 }
                 RxEvent::DecodeFailed { label, call, snr_db } => println!("{call:<9} {label}: decoding failed (SNR {snr_db:.1} dB)"),
                 RxEvent::Error(e) => error = Some(e),
@@ -500,6 +507,8 @@ fn picture_file(p: &PictureArgs, budget: usize) -> Result<Vec<u8>> {
     let format = match p.format {
         PicFormat::Webp => Format::WebpLossy,
         PicFormat::WebpLossless => Format::WebpLossless,
+        // v2 frames carry the picture in order: it arrives whole and coarse first.
+        PicFormat::Jpeg if p.v2 => Format::JpegProgressive,
         PicFormat::Jpeg => Format::Jpeg,
         PicFormat::Png => Format::Png,
     };
