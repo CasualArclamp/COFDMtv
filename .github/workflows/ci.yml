@@ -7,8 +7,8 @@
 #
 # Not here: the cross-checks against the original C++ (scripts/xcheck.sh,
 # scripts/sensitivity.sh) need the aicodix repositories and a C++ compiler, and the live
-# tests need virtual audio cables; both run locally. The repository is private, so the
-# runners' minutes count: one job per system.
+# tests need virtual audio cables; both run locally. One job per system keeps a run
+# short.
 name: CI
 
 on:

@@ -17,7 +17,8 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
   LED status strip, egui_plot spectrum and constellations, waterfall, cards on the
   transmitter page, log panel.
 - **Version control**: git with a commit per milestone, pushed to a private GitHub
-  repository CasualArclamp/COFDMtv, CI on GitHub Actions (Linux and Windows).
+  repository CasualArclamp/COFDMtv, CI on GitHub Actions (Linux and Windows). Made
+  public at the user's request on 2026-10-06, with v0.1.2.
 
 ## Choices made while building
 
@@ -186,4 +187,5 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
       (`scripts/build-portable.ps1`; `release.yml` drafts a release from a pushed tag).
       v0.1.0 released 2026-10-06 (14e97f2; built, checked and smoke-tested by
       `release.yml`, hashes verified, published). v0.1.1 the same day (55e9142): the
-      constellation builds up and zooms.
+      constellation builds up and zooms. v0.1.2 the same day (813ab31): the
+      constellation without a grid, the README with pictures; the repository public.
