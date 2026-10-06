@@ -2,7 +2,8 @@
 //!
 //! The plots are monitoring displays (DecDRM's): their axes are set from the data every
 //! frame and zooming/dragging is disabled; hovering shows the value under the cursor. The
-//! constellation builds up the last symbols' points as BinModem's symbol scope does.
+//! constellation builds up the last symbols' points as BinModem's symbol scope does, and
+//! zooms (scroll, drag, double-click).
 
 use super::{Palette, placeholder};
 use crate::receiver::RxSession;
@@ -12,11 +13,21 @@ use eframe::egui::{self, Color32, ColorImage, ComboBox, RichText, TextureHandle,
 use std::sync::Arc;
 use egui_plot::{HLine, HoverPosition, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotImage, PlotPoint, PlotPoints, Points as Scatter, Span as PlotSpan, VLine};
 
-/// The waterfall's and the constellation's images on the GPU.
+/// The waterfall's and the constellation's images on the GPU, and the constellation's
+/// zoom.
 #[derive(Default)]
 pub struct PlotTextures {
     waterfall: RingImage,
-    constellation: Option<ConstellationImage>,
+    constellation: ConstellationState,
+}
+
+/// The constellation's build-up image and the part of it shown.
+#[derive(Default)]
+struct ConstellationState {
+    image: Option<ConstellationImage>,
+    view: View,
+    /// The modulation the view is for: another one is shown whole.
+    label: String,
 }
 
 /// The constellation's build-up image, and what it was made from.
@@ -25,6 +36,7 @@ struct ConstellationImage {
     texels: usize,
     colour: Color32,
     few: bool,
+    view: View,
     texture: TextureHandle,
 }
 
@@ -192,66 +204,164 @@ fn waterfall_plot(ui: &mut Ui, rx: &RxSession, texture: &mut RingImage, band: Op
     }
 }
 
-/// I and Q the constellation plot spans: ± this.
-const SPAN: f32 = 1.5;
+/// I and Q the whole constellation plot spans: ± this.
+const SPAN: f64 = 1.5;
 /// Most texels across the constellation's image (a bigger plot shows them larger).
 const MAX_TEXELS: usize = 1024;
+/// Deepest zoom into the constellation.
+const MAX_ZOOM: f64 = 64.0;
+/// Points of scrolling that zoom by a factor of e (a mouse wheel's notch: about 1.3).
+const SCROLL_PER_E: f64 = 200.0;
+
+/// The part of the constellation shown: its centre and half its width, in I and Q.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct View {
+    centre: [f64; 2],
+    half: f64,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        View::ALL
+    }
+}
+
+impl View {
+    /// The whole constellation.
+    const ALL: View = View { centre: [0.0, 0.0], half: SPAN };
+
+    fn zoom(self) -> f64 {
+        SPAN / self.half
+    }
+
+    /// Zoomed in by `factor` (below 1: out), the point `at` staying where it is.
+    fn zoomed(self, factor: f64, at: [f64; 2]) -> View {
+        let half = (self.half / factor).clamp(SPAN / MAX_ZOOM, SPAN);
+        let k = half / self.half;
+        View { centre: [at[0] + (self.centre[0] - at[0]) * k, at[1] + (self.centre[1] - at[1]) * k], half }.inside()
+    }
+
+    /// Moved by `by` (I, Q).
+    fn moved(self, by: [f64; 2]) -> View {
+        View { centre: [self.centre[0] + by[0], self.centre[1] + by[1]], ..self }.inside()
+    }
+
+    /// Kept within the whole constellation's span.
+    fn inside(self) -> View {
+        let room = SPAN - self.half;
+        View { centre: [self.centre[0].clamp(-room, room), self.centre[1].clamp(-room, room)], ..self }
+    }
+
+    fn min(self) -> [f64; 2] {
+        [self.centre[0] - self.half, self.centre[1] - self.half]
+    }
+
+    fn max(self) -> [f64; 2] {
+        [self.centre[0] + self.half, self.centre[1] + self.half]
+    }
+}
 
 /// The payload's constellation on a square plot: the last symbols' points building up
-/// where they land (see [`build_up`]), the ideal points as crosses.
-fn constellation(ui: &mut Ui, rx: &RxSession, pal: &Palette, side: f32, image: &mut Option<ConstellationImage>) {
+/// where they land (see [`build_up`]), the ideal points as crosses. Scrolling zooms in
+/// and out around the cursor, dragging moves the view, a double-click shows it all again;
+/// the points are drawn anew for the part shown, so a QAM4096 zoomed into shows its
+/// clusters.
+fn constellation(ui: &mut Ui, rx: &RxSession, pal: &Palette, side: f32, state: &mut ConstellationState) {
     let snap = &rx.snap;
+    if state.label != snap.constellation_label {
+        state.label.clone_from(&snap.constellation_label);
+        state.view = View::ALL;
+    }
     ui.vertical(|ui| {
-        let n = snap.constellation_symbols;
-        if snap.constellation.is_empty() {
-            ui.label("Payload");
-        } else {
-            ui.label(format!("{} payload, last {n} symbol{}", snap.constellation_label, if n == 1 { "" } else { "s" })).on_hover_text(format!(
-                "{} points, each drawn faintly: where symbols keep landing, on the constellation's points, they build up",
-                snap.constellation.len()
-            ));
-        }
+        ui.horizontal(|ui| {
+            let n = snap.constellation_symbols;
+            if snap.constellation.is_empty() {
+                ui.label("Payload");
+            } else {
+                ui.label(format!("{} payload, last {n} symbol{}", snap.constellation_label, if n == 1 { "" } else { "s" })).on_hover_text(format!(
+                    "{} points, each drawn faintly: where symbols keep landing, on the constellation's points, they build up.\nScroll to zoom, drag to move, double-click to see it all.",
+                    snap.constellation.len()
+                ));
+            }
+            if state.view != View::ALL {
+                ui.label(RichText::new(format!("{:.1}×", state.view.zoom())).weak());
+                if ui.small_button("All").on_hover_text("The whole constellation (or double-click it)").clicked() {
+                    state.view = View::ALL;
+                }
+            }
+        });
+        let view = state.view;
         let texels = ((side * ui.ctx().pixels_per_point()).round() as usize).clamp(64, MAX_TEXELS);
         // The modulations with ideal points to show have few points: larger squares.
         let few = !snap.ideal.is_empty();
-        let texture = (!snap.constellation.is_empty()).then(|| refresh(ui.ctx(), image, &snap.constellation, texels, pal.points, few));
+        let texture = (!snap.constellation.is_empty()).then(|| refresh(ui.ctx(), &mut state.image, &snap.constellation, texels, pal.points, few, view));
         let ideal: Vec<[f64; 2]> = snap.ideal.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
-        let span = f64::from(SPAN);
-        base_plot("constellation")
+        let plot = base_plot("constellation")
             .width(side)
             .height(side)
             .data_aspect(1.0)
             .show_axes(false)
             .label_formatter(hover_label("I", 2, "Q", 2))
             .show(ui, |p| {
-                p.set_plot_bounds(PlotBounds::from_min_max([-span, -span], [span, span]));
+                p.set_plot_bounds(PlotBounds::from_min_max(view.min(), view.max()));
                 p.hline(HLine::new("", 0.0).color(Color32::from_gray(128)).width(0.5));
                 p.vline(VLine::new("", 0.0).color(Color32::from_gray(128)).width(0.5));
                 // (egui_plot paints images first, under everything else.)
                 if let Some(id) = texture {
-                    p.image(PlotImage::new("points", id, PlotPoint::new(0.0, 0.0), [2.0 * SPAN, 2.0 * SPAN]));
+                    let size = (2.0 * view.half) as f32;
+                    p.image(PlotImage::new("points", id, PlotPoint::new(view.centre[0], view.centre[1]), [size, size]));
                 }
                 if !ideal.is_empty() {
                     p.points(Scatter::new("ideal", PlotPoints::new(ideal)).shape(MarkerShape::Plus).color(pal.ideal.gamma_multiply(0.8)).radius(4.0));
                 }
             });
+        state.view = interact(ui, &plot.response, &plot.transform, state.view);
     });
 }
 
-/// The constellation's texture, made again when the points, the size or the colour
-/// changed (new points come with each payload symbol, a few times a second).
-fn refresh(ctx: &egui::Context, image: &mut Option<ConstellationImage>, points: &Arc<Vec<[f32; 2]>>, texels: usize, colour: Color32, few: bool) -> TextureId {
-    let current = image.as_ref().is_some_and(|i| Arc::ptr_eq(&i.points, points) && i.texels == texels && i.colour == colour && i.few == few);
+/// The view after scrolling (or pinching), dragging or double-clicking on the plot.
+fn interact(ui: &Ui, response: &egui::Response, transform: &egui_plot::PlotTransform, view: View) -> View {
+    if response.double_clicked() {
+        return View::ALL;
+    }
+    let mut view = view;
+    if response.dragged() {
+        view = view.moved(pan(response.drag_delta(), transform.dvalue_dpos()));
+    }
+    if let Some(pos) = response.hover_pos() {
+        let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+        let factor = f64::from(pinch) * (f64::from(scroll) / SCROLL_PER_E).exp();
+        if factor != 1.0 {
+            let at = transform.value_from_position(pos);
+            view = view.zoomed(factor, [at.x, at.y]);
+            // The plot used the scroll: nothing else is to.
+            ui.ctx().input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        }
+    }
+    view
+}
+
+/// I and Q a drag of `d` pixels moves the view by, `per_pixel` being I and Q per pixel
+/// (Q's negative: the screen's y goes down). The view moves against the drag, so that the
+/// constellation follows the pointer.
+fn pan(d: egui::Vec2, per_pixel: [f64; 2]) -> [f64; 2] {
+    [-f64::from(d.x) * per_pixel[0], -f64::from(d.y) * per_pixel[1]]
+}
+
+/// The constellation's texture, made again when the points, the size, the colour or the
+/// view changed (new points come with each payload symbol, a few times a second).
+fn refresh(ctx: &egui::Context, image: &mut Option<ConstellationImage>, points: &Arc<Vec<[f32; 2]>>, texels: usize, colour: Color32, few: bool, view: View) -> TextureId {
+    let current = image.as_ref().is_some_and(|i| Arc::ptr_eq(&i.points, points) && i.texels == texels && i.colour == colour && i.few == few && i.view == view);
     if !current {
-        let pixels = build_up(points, texels, colour, few);
+        let pixels = build_up(points, texels, colour, few, view);
         match image {
             Some(i) => {
                 i.texture.set(pixels, TextureOptions::NEAREST);
-                (i.points, i.texels, i.colour, i.few) = (Arc::clone(points), texels, colour, few);
+                (i.points, i.texels, i.colour, i.few, i.view) = (Arc::clone(points), texels, colour, few, view);
             }
             None => {
                 let texture = ctx.load_texture("constellation", pixels, TextureOptions::NEAREST);
-                *image = Some(ConstellationImage { points: Arc::clone(points), texels, colour, few, texture });
+                *image = Some(ConstellationImage { points: Arc::clone(points), texels, colour, few, view, texture });
             }
         }
     }
@@ -264,12 +374,14 @@ fn refresh(ctx: &egui::Context, image: &mut Option<ConstellationImage>, points: 
 /// stays faint. A modulation of `few` points (up to 64: PSK, QAM16, QAM64) gets larger,
 /// less faint squares, as BinModem's smaller constellations do (there the choice goes by
 /// the points kept; here every symbol brings hundreds, so it goes by the modulation), large
-/// enough to show around the ideal points' crosses. The image is `texels` square over
-/// ±[`SPAN`].
-fn build_up(points: &[[f32; 2]], texels: usize, colour: Color32, few: bool) -> ColorImage {
+/// enough to show around the ideal points' crosses. The image is `texels` square over the
+/// `view`; the squares keep their size on the screen at any zoom, so a zoomed cluster
+/// spreads out into its symbols.
+fn build_up(points: &[[f32; 2]], texels: usize, colour: Color32, few: bool, view: View) -> ColorImage {
     let alpha = if few { 150.0 / 255.0 } else { 110.0 / 255.0 };
     let square = ((texels as f32 / 360.0).clamp(1.0, 2.5) * if few { 2.5 } else { 1.0 }).round().max(1.0) as i64;
-    let scale = texels as f32 / (2.0 * SPAN);
+    let scale = texels as f64 / (2.0 * view.half);
+    let (left, top) = (view.centre[0] - view.half, view.centre[1] + view.half);
     let n = texels as i64;
     let mut hits = vec![0u16; texels * texels];
     for &[x, y] in points {
@@ -277,8 +389,8 @@ fn build_up(points: &[[f32; 2]], texels: usize, colour: Color32, few: bool) -> C
             continue;
         }
         // The square's first texel, rows from the top.
-        let x0 = ((x + SPAN) * scale - square as f32 / 2.0).round() as i64;
-        let y0 = ((SPAN - y) * scale - square as f32 / 2.0).round() as i64;
+        let x0 = ((f64::from(x) - left) * scale - square as f64 / 2.0).round() as i64;
+        let y0 = ((top - f64::from(y)) * scale - square as f64 / 2.0).round() as i64;
         for row in y0.max(0)..(y0 + square).min(n) {
             for col in x0.max(0)..(x0 + square).min(n) {
                 let h = &mut hits[(row * n + col) as usize];
@@ -311,8 +423,9 @@ mod tests {
         points.push([-0.5, 0.25]);
         points.push([f32::NAN, 0.0]);
         points.push([9.0, 9.0]);
-        let img = build_up(&points, 300, colour, false);
-        let at = |x: f32, y: f32| img.pixels[((SPAN - y) * 100.0) as usize * 300 + ((x + SPAN) * 100.0) as usize];
+        let img = build_up(&points, 300, colour, false, View::ALL);
+        // The texel a point (in f32, as the points are) falls into.
+        let at = |x: f32, y: f32| img.pixels[((SPAN - f64::from(y)) * 100.0) as usize * 300 + ((f64::from(x) + SPAN) * 100.0) as usize];
         let (one, twelve, many) = (at(-0.5, 0.25).a(), at(0.5, 0.5).a(), at(-1.4, -1.4).a());
         assert!(one > 0 && one < 120, "a single point is faint: {one}");
         assert!(twelve > 240, "a dozen build up: {twelve}");
@@ -320,8 +433,45 @@ mod tests {
         assert_eq!(at(1.0, -1.0), Color32::TRANSPARENT);
         assert_eq!(img.pixels.iter().filter(|p| p.a() > 0).count(), 3, "one texel per point at this size, nothing for NaN or off the plot");
         // The points of a small constellation are squares of three texels here.
-        let img = build_up(&[[0.5, 0.5]], 300, colour, true);
+        let img = build_up(&[[0.5, 0.5]], 300, colour, true, View::ALL);
         assert_eq!(img.pixels.iter().filter(|p| p.a() > 0).count(), 9);
     }
-}
 
+    /// Two neighbouring QAM4096 points are about 4 texels apart on a plot of 300: zoomed
+    /// in eight times on them, 31.
+    #[test]
+    fn a_zoomed_view_is_drawn_at_full_resolution() {
+        let colour = Color32::from_rgb(90, 160, 255);
+        let d = 2.0 / 2730f32.sqrt();
+        let points = [[1.0f32, 1.0], [1.0 + d, 1.0]];
+        let columns = |img: &ColorImage| -> Vec<usize> { (0..300).filter(|&c| (0..300).any(|r| img.pixels[r * 300 + c].a() > 0)).collect() };
+        let all = columns(&build_up(&points, 300, colour, false, View::ALL));
+        let zoomed = View::ALL.zoomed(8.0, [1.0, 1.0]);
+        assert_eq!(zoomed.zoom(), 8.0);
+        let close = columns(&build_up(&points, 300, colour, false, zoomed));
+        assert_eq!((all.len(), close.len()), (2, 2));
+        assert!((all[1] - all[0]).abs_diff(4) <= 1, "{all:?}");
+        assert!((close[1] - close[0]).abs_diff(31) <= 1, "{close:?}");
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_cursor_and_stays_inside() {
+        let v = View::ALL.zoomed(4.0, [1.0, -0.5]);
+        assert!((v.half - SPAN / 4.0).abs() < 1e-12);
+        // The point under the cursor keeps its place in the view: 5/6 across, 1/3 down.
+        assert!(((1.0 - v.min()[0]) / (2.0 * v.half) - 5.0 / 6.0).abs() < 1e-12);
+        assert!(((-0.5 - v.min()[1]) / (2.0 * v.half) - 1.0 / 3.0).abs() < 1e-12);
+        assert_eq!(v.zoomed(0.01, [0.3, 0.3]), View::ALL, "out to the whole and no further");
+        assert_eq!(View::ALL.zoomed(1e9, [0.0, 0.0]).zoom(), MAX_ZOOM);
+        let corner = View::ALL.zoomed(4.0, [1.5, 1.5]);
+        assert!(corner.max()[0] <= SPAN && corner.max()[1] <= SPAN);
+        assert_eq!(corner.moved([1.0, 1.0]), corner, "no further than the edge");
+    }
+
+    #[test]
+    fn dragging_pulls_the_constellation_along() {
+        // I per pixel positive, Q per pixel negative (y down on the screen).
+        let by = pan(egui::vec2(10.0, 20.0), [0.01, -0.01]);
+        assert_eq!(by, [-0.1, 0.2], "right and down: the view goes left and up");
+    }
+}

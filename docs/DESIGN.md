@@ -146,7 +146,10 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
   the last symbols' points, a dozen per point of the modulation and at least 512
   (QAM4096: 49 152 points, the last 192 symbols; a new modulation starts afresh), and
   each is drawn as a faint square, so clusters grow where symbols keep landing; larger
-  squares for modulations of up to 64 points, under their ideal points' crosses) →
+  squares for modulations of up to 64 points, under their ideal points' crosses;
+  scrolling zooms around the cursor up to 64×, dragging moves the view, a double-click
+  or "All" shows it whole, and the points are drawn anew for the part shown, so a
+  zoomed QAM4096 shows its clusters) →
   side panel: the latest or chosen picture, its facts and Open/Folder, a multi-frame
   progress card, the gallery, the messages, or the files.
 - Transmitter: cards Station (call sign, checked live), Send (Picture with original and
