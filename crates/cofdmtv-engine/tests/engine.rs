@@ -94,8 +94,8 @@ fn modem_text_and_file() {
     let blocks = multiframe::blocks_in(file.len(), mode.data_bytes());
     let frames = multiframe::split_chunks(&file, blocks + 1, mode.data_bytes()).unwrap();
     let jobs = vec![
-        TxJob::modem("text", ModemRequest { mode, call_sign: "DL1ABC".into(), carrier_hz: 1500, frames: vec![text.as_bytes().to_vec()] }, 0.3),
-        TxJob::modem("file", ModemRequest { mode, call_sign: "DL1ABC".into(), carrier_hz: 1800, frames: frames[1..].to_vec() }, 0.3),
+        TxJob::modem("text", ModemRequest::new(mode, "DL1ABC", 1500, vec![text.as_bytes().to_vec()]), 0.3),
+        TxJob::modem("file", ModemRequest::new(mode, "DL1ABC", 1800, frames[1..].to_vec()), 0.3),
     ];
     transmit(&wav, 48000, TxChannel::Mono, jobs);
     let saves = dir.path().join("received");
@@ -105,4 +105,28 @@ fn modem_text_and_file() {
     assert_eq!(got.data, file);
     assert_eq!(got.frames, blocks);
     assert_eq!(std::fs::read(got.saved.as_ref().unwrap()).unwrap(), file);
+}
+
+/// A v2 picture: a lead-in, the picture in QAM256 frames sized by air time with an extra
+/// frame, the fancy header; the first frame lost. It arrives whole, labelled v2.
+#[test]
+fn v2_picture() {
+    use cofdmtv_core::modem::{CodeRate, ModemMode, Modulation};
+    use cofdmtv_engine::v2;
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("v2.wav");
+    let jpeg = std::fs::read(fixture("testcard_large.jpg")).unwrap();
+    let mode = ModemMode { modulation: Modulation::Qam256, rate: CodeRate::Half, normal: false };
+    let lead = v2::lead_in_symbols(1.0);
+    let plan = v2::plan(mode, 30.0, lead, true, 1);
+    assert!(plan.budget >= jpeg.len(), "{plan:?}");
+    let frames = v2::frames(&jpeg, mode, plan.extra()).unwrap();
+    let request = v2::request(mode, "DL1ABC/P", 1500, frames[1..].to_vec(), lead, true);
+    transmit(&wav, 48000, TxChannel::Mono, vec![TxJob::modem("v2 picture", request, 0.0)]);
+    let events = receive(&wav, ChannelSel::Mix, None);
+    let picture = events.iter().find_map(|e| if let RxEvent::Picture(p) = e { Some(p) } else { None }).expect("the picture");
+    assert_eq!(picture.data, jpeg);
+    assert_eq!(picture.kind, Some(ImageKind::Jpeg));
+    assert_eq!(picture.label, "v2 QAM256 1/2 short");
+    assert_eq!(picture.call, "DL1ABC/P");
 }

@@ -188,11 +188,6 @@ impl TxKind {
             Self::Data => "Data",
         }
     }
-
-    /// Sent over the aicodix modem rather than COFDMTV.
-    pub fn is_modem(self) -> bool {
-        self == Self::Data
-    }
 }
 
 /// What the modem sends.
@@ -354,6 +349,12 @@ pub struct Settings {
     pub data_carrier_hz: i32,
     pub data_source: DataSource,
     pub data_file: Option<PathBuf>,
+    /// Pictures in a v2 mode: modem frames in `v2_mode` at the modem's carrier
+    /// (`data_carrier_hz`), compressed to fill `v2_air_s` seconds on the air.
+    pub picture_v2: bool,
+    #[serde(with = "modem_mode_name")]
+    pub v2_mode: ModemMode,
+    pub v2_air_s: u32,
     pub tx_output: TxOutputKind,
     pub tx_device: Option<String>,
     pub tx_file: Option<PathBuf>,
@@ -397,6 +398,9 @@ impl Default for Settings {
             data_carrier_hz: modem::DEFAULT_CARRIER_HZ,
             data_source: DataSource::Text,
             data_file: None,
+            picture_v2: false,
+            v2_mode: ModemMode { modulation: Modulation::Qam16, rate: CodeRate::Half, normal: true },
+            v2_air_s: 30,
             tx_output: TxOutputKind::Device,
             tx_device: None,
             tx_file: None,
@@ -407,6 +411,17 @@ impl Default for Settings {
         }
     }
 }
+
+impl Settings {
+    /// What is set up goes over the aicodix modem (data, or a picture in a v2 mode) rather
+    /// than COFDMTV.
+    pub fn modem_signal(&self) -> bool {
+        self.tx_kind == TxKind::Data || (self.tx_kind == TxKind::Picture && self.picture_v2)
+    }
+}
+
+/// Air times offered for v2 pictures, seconds.
+pub const AIR_CHOICES: [u32; 10] = [10, 15, 20, 30, 45, 60, 90, 120, 180, 300];
 
 /// `Pictures\COFDMtv` in the user's home (as Assempix saves to Pictures).
 pub fn default_save_dir() -> Option<PathBuf> {
@@ -506,6 +521,9 @@ mod tests {
             tx_kind: TxKind::Data,
             data_mode: ModemMode { modulation: Modulation::Psk8, rate: CodeRate::FiveSixths, normal: true },
             data_source: DataSource::File,
+            picture_v2: true,
+            v2_mode: ModemMode { modulation: Modulation::Qam256, rate: CodeRate::TwoThirds, normal: false },
+            v2_air_s: 60,
             ..Settings::default()
         };
         assert!(toml::to_string_pretty(&s).unwrap().contains("data_mode = \"8PSK 5/6 normal\""));

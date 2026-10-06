@@ -17,6 +17,29 @@ pub struct ModemRequest {
     /// Carrier frequency, Hz: a multiple of 300 (negative only for I/Q output).
     pub carrier_hz: i32,
     pub frames: Vec<Vec<u8>>,
+    /// Noise symbols before the first frame, at least one: the original sends one; more
+    /// give a radio's VOX and AGC time to settle (the lead-in of v2 pictures).
+    pub noise_symbols: usize,
+    /// COFDMTV's fancy header after the last frame, the call sign drawn into the waterfall
+    /// (v2 pictures; not in the original).
+    pub fancy_header: bool,
+}
+
+impl ModemRequest {
+    /// A transmission as the original sends it: one noise symbol, no fancy header.
+    pub fn new(mode: ModemMode, call_sign: impl Into<String>, carrier_hz: i32, frames: Vec<Vec<u8>>) -> Self {
+        Self { mode, call_sign: call_sign.into(), carrier_hz, frames, noise_symbols: 1, fancy_header: false }
+    }
+}
+
+/// Seconds of a transmission of `frames` frames in `mode` after `noise_symbols` noise
+/// symbols, with COFDMTV's fancy header (2.16 s) after it if `fancy_header`. The same at
+/// 44.1 and 48 kHz: a symbol with its guard interval is 41/300 s.
+pub fn transmission_seconds(mode: ModemMode, frames: usize, noise_symbols: usize, fancy_header: bool) -> f64 {
+    // The two sync symbols have no guard interval between them; a last one ends it all.
+    let guards = (noise_symbols.max(1) + frames * (3 + mode.symbols())) * 41 - frames + 1;
+    let fancy = if fancy_header { 12.0 * crate::cofdmtv::SYMBOL_SECONDS } else { 0.0 };
+    guards as f64 / 300.0 + fancy
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +49,7 @@ enum Step {
     Sync2,
     Symbol(usize),
     Finish,
+    Fancy,
     Done,
 }
 
@@ -54,6 +78,12 @@ pub struct ModemEncoder {
     step: Step,
     produced: usize,
     total: usize,
+    /// Noise symbols still to send, and the lead-in's noise before the original one.
+    noise_left: usize,
+    lead: Mls,
+    /// The fancy header after the last frame (COFDMTV's encoder, at this rate).
+    fancy: Option<Box<crate::cofdmtv::Encoder>>,
+    fancy_on: bool,
     /// PAPR of the symbols sent (the original prints it).
     pub papr_db: Vec<f32>,
 }
@@ -98,6 +128,10 @@ impl ModemEncoder {
             step: Step::Done,
             produced: 0,
             total: 0,
+            noise_left: 0,
+            lead: Mls::new(crate::cofdmtv::NOISE_POLY),
+            fancy: None,
+            fancy_on: false,
             papr_db: Vec::new(),
         })
     }
@@ -139,12 +173,20 @@ impl ModemEncoder {
         polar::encode(&mut code, &mesg, &MODEM_FROZEN_256_72);
         let code: Vec<f32> = code.iter().map(|&b| nrz(b != 0)).collect();
         super::shuffle(&mut self.meta, &code, 8);
+        self.fancy_on = req.fancy_header;
+        if req.fancy_header {
+            let rate = self.layout.rate;
+            let fancy = self.fancy.get_or_insert_with(|| Box::new(crate::cofdmtv::Encoder::new(rate).expect("COFDMTV runs at the modem's rates")));
+            fancy.configure_fancy_header(&req.call_sign, req.carrier_hz)?;
+        }
         self.frames = req.frames.clone();
         self.frame = 0;
         self.guard.fill(Cplx::new(0.0, 0.0));
+        self.noise_left = req.noise_symbols.max(1);
+        self.lead = Mls::new(crate::cofdmtv::NOISE_POLY);
         self.step = Step::Noise;
         self.produced = 0;
-        self.total = 1 + self.frames.len() * (3 + self.mode.symbols()) + 1;
+        self.total = self.noise_left + self.frames.len() * (3 + self.mode.symbols()) + 1 + if self.fancy_on { 12 } else { 0 };
         self.papr_db.clear();
         Ok(())
     }
@@ -160,15 +202,23 @@ impl ModemEncoder {
 
     /// Seconds of the whole transmission.
     pub fn total_seconds(&self) -> f64 {
-        let l = self.layout;
-        let symbols = 1 + self.frames.len() * (3 + self.mode.symbols());
-        (symbols * l.extended_len - self.frames.len() * l.guard_len + l.guard_len) as f64 / f64::from(l.rate)
+        let lead_in = self.total - self.frames.len() * (3 + self.mode.symbols()) - 1 - if self.fancy_on { 12 } else { 0 };
+        transmission_seconds(self.mode, self.frames.len(), lead_in, self.fancy_on)
     }
 
     /// The next piece of the signal (complex; the real part is the audio), or `None`.
     pub fn next_chunk(&mut self) -> Option<&[Cplx]> {
         self.out.clear();
         match self.step {
+            Step::Noise if self.noise_left > 1 => {
+                // A lead-in symbol before the original's noise symbol: noise from a running
+                // sequence, so no two are alike (repeated symbols could look like a sync).
+                self.noise_left -= 1;
+                for t in &mut self.tone {
+                    *t = Cplx::new(nrz(self.lead.next()), 0.0);
+                }
+                self.symbol(-3);
+            }
             Step::Noise => {
                 let mut noise = Mls::new(MLS2_POLY);
                 for t in &mut self.tone {
@@ -205,7 +255,19 @@ impl ModemEncoder {
                 }
                 self.out.extend_from_slice(&self.guard);
                 self.guard.fill(Cplx::new(0.0, 0.0));
-                self.step = Step::Done;
+                self.step = if self.fancy_on { Step::Fancy } else { Step::Done };
+            }
+            Step::Fancy => {
+                // COFDMTV's symbols carry about 3 dB less than the modem's (an RMS of 0.35
+                // against 0.5): matched, so the header is as loud as the frames.
+                let gain = std::f32::consts::SQRT_2;
+                match self.fancy.as_mut().and_then(|f| f.next_symbol()) {
+                    Some(symbol) => self.out.extend(symbol.iter().map(|&c| c * gain)),
+                    None => {
+                        self.step = Step::Done;
+                        return None;
+                    }
+                }
             }
             Step::Done => return None,
         }

@@ -20,6 +20,18 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
   repository CasualArclamp/COFDMtv, CI on GitHub Actions (Linux and Windows). Made
   public at the user's request on 2026-10-06, with v0.1.2.
 
+## Decisions on v2 picture modes (user, 2026-10-06)
+
+"Putting the data modes, where you choose the code rate and the modcod, into the SSTV
+modes — maybe we will call these v2 modes." Asked how, the user chose:
+
+- **Signal**: the picture in aicodix modem frames (not a new COFDMTV signal), so every
+  modulation, code rate and frame size of the modem is there, at 44.1 and 48 kHz,
+  2400 Hz wide;
+- **Modcod**: a free choice of modulation, code rate and frame size, as for data;
+- **Extras**: COFDMTV's fancy header, the noise lead-in, and extra frames;
+- **Size**: set by the air time the picture may take.
+
 ## Choices made while building
 
 - **Pure Rust port** of the C++ (aicodix, BSD Zero Clause License), as DecDRM ported Dream:
@@ -106,7 +118,8 @@ like DecDRM (`F:\DRM`, github.com/CasualArclamp/DecDRM).
 - `crates/cofdmtv-pix` — pictures to send: EXIF orientation, scaling to Shredpix's pixel
   budgets within Assempix's 16…1024 sides, JPEG/PNG/WebP (libwebp, vendored) at the
   highest quality that fits; decoding received ones for display.
-- `apps/cofdmtv-cli` — `cofdmtv rx|tx picture|text|ping|data|devices`.
+- `apps/cofdmtv-cli` — `cofdmtv rx|tx picture|text|ping|data|devices` (`tx picture --v2`
+  for v2 picture modes).
 
 ## More choices
 
@@ -155,11 +168,14 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
   side panel: the latest or chosen picture, its facts and Open/Folder, a multi-frame
   progress card, the gallery, the messages, or the files.
 - Transmitter: cards Station (call sign, checked live), Send (Picture with original and
-  "as it will arrive" previews, format, size, frames + extra, send-as-is; Text with a
+  "as it will arrive" previews, format, size, frames + extra — for a v2 picture the air
+  time + extra and what fits —, send-as-is; Text with a
   byte counter and the mode it takes; Ping; Data: a text or a file over the modem, with
   the frames it takes and extra frames), Signal (COFDMTV: mode, carrier within the range
   the mode allows, lead-in, fancy header; modem: modulation, code rate, frame size with
-  bytes, duration and bit rate, carrier in 300 Hz steps; both: carriers above 3 kHz),
+  bytes, duration and bit rate, carrier in 300 Hz steps; pictures choose between
+  COFDMTV 6–13 and v2, which has the modem's rows plus lead-in and fancy header; all:
+  carriers above 3 kHz),
   Output (sound card or file, rate, channels, level); status side: Transmission (state,
   the big Transmit/Stop button with the reason it is off, frame k of n, progress), Output
   (meter, destination, rates), Output spectrum, Sent.
@@ -171,6 +187,32 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
 - Live GUI test (2026-10-05): GUI receiving from VB-Audio cable A while the CLI sent a
   text and a picture: both received, fancy headers legible; GUI `--transmit` of a
   three-frame picture to a file rebuilt by COFDMtv and by the Assempix logic.
+
+## v2 picture modes
+
+A picture in aicodix modem frames (`cofdmtv_engine::v2`):
+
+- On the air: the lead-in's noise symbols (the transmitter's lead-in, converted to
+  modem symbols of 41/300 s; the modem's own noise symbol is the last of them), the
+  picture as a multi-frame file with the CRS header in frames of the chosen mode (any
+  `blocks` of the frames rebuild it), then COFDMTV's fancy header — 11 lines and a
+  silent symbol, drawn as after a Shredpix picture — at the modem's carrier, 3 dB up
+  so that it is as loud as the frames. Extra lead-in symbols come from a running noise
+  sequence: repeated symbols could look like a sync.
+- The air time sets the frames: as many as fit in the time with the lead-in, the header
+  and the extra frames (one at least; extra frames only when there are frames to
+  spare), and the picture is compressed to fill their blocks.
+- The receiver needs nothing new: modem frames rebuild the file, a picture is shown as
+  one, labelled "v2 QAM64 1/2 normal" and so on.
+- `ModemRequest` has the lead-in (`noise_symbols`) and the header (`fancy_header`);
+  `ModemRequest::new` is the original's transmission (one noise symbol, no header), so
+  the waveform cross-checks still compare with the original encoder.
+- COFDMtv receives v2 pictures; Assempix does not (it hears no COFDMTV), and the
+  original modem's decoder writes the frames as they come (CRS-coded).
+- Checked: core round trips (lead-in and header leave the frames decodable, no false
+  syncs, timing exact), an engine round trip with the first frame lost, CLI and GUI end
+  to end (`tx picture --v2`, the GUI's v2 picture through a file into its receiver), the
+  smoke test.
 
 ## Milestones
 
@@ -189,3 +231,5 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
       `release.yml`, hashes verified, published). v0.1.1 the same day (55e9142): the
       constellation builds up and zooms. v0.1.2 the same day (813ab31): the
       constellation without a grid, the README with pictures; the repository public.
+- [x] M7 — v2 picture modes: pictures in aicodix modem frames with a free modcod, lead-in,
+      fancy header and extra frames, sized by air time (core, engine, CLI, GUI).

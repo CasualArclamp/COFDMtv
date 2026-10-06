@@ -13,6 +13,7 @@ pub mod payload;
 pub mod receiver;
 pub mod spectrum;
 pub mod transmitter;
+pub mod v2;
 
 pub use cofdmtv_core;
 pub use cofdmtv_io;

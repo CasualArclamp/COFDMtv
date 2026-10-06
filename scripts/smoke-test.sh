@@ -4,10 +4,10 @@
 #   scripts/smoke-test.sh BIN_DIR OUT_DIR
 #
 # BIN_DIR holds cofdmtv and cofdmtv-gui. The CLI transmits a picture, a text, a
-# multi-frame picture and modem datagrams (a text, a file, a multi-frame picture) into
-# files and receives them; the GUI receives the picture file and saves a screenshot
-# (headless under xvfb-run on Linux; on Windows it needs an OpenGL driver, Mesa on
-# GitHub's runners). OUT_DIR receives the receiver output and the screenshot.
+# multi-frame picture, modem datagrams (a text, a file, a multi-frame picture) and a v2
+# picture into files and receives them; the GUI receives the picture file and saves a
+# screenshot (headless under xvfb-run on Linux; on Windows it needs an OpenGL driver,
+# Mesa on GitHub's runners). OUT_DIR receives the receiver output and the screenshot.
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
@@ -51,6 +51,12 @@ cmp modem_received/*.bin "$fixtures/rattlegram_text.txt"
 "$bin/cofdmtv" tx data "$fixtures/testcard.jpg" --call CI1TEST --modulation qam64 --code-rate 2/3 --frame normal --carrier 2100 -o modem_picture.wav
 "$bin/cofdmtv" rx modem_picture.wav --out-dir modem_received | tee "$out/rx_modem_picture.txt"
 cmp modem_received/*.jpg "$fixtures/testcard.jpg"
+
+echo "== v2 picture: QAM64 1/2 normal frames, lead-in, fancy header, an extra frame"
+"$bin/cofdmtv" tx picture "$fixtures/testcard.jpg" --v2 --modulation qam64 --frame normal --air-time 20 --call CI1/TEST -o v2.wav
+"$bin/cofdmtv" rx v2.wav --out-dir v2_received | tee "$out/rx_v2.txt"
+grep -E "CI1/TEST  picture, v2 QAM64 1/2 normal: 5345 bytes, JPEG" "$out/rx_v2.txt"
+cmp v2_received/*.jpg "$fixtures/testcard.jpg"
 
 echo "== GUI: receive the picture file, screenshot"
 cat > gui.toml <<'TOML'

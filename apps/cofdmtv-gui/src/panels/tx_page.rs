@@ -16,14 +16,14 @@ use super::meter::{GOOD, HOT, WARN, level_meter};
 use super::plots::{SpectrumView, spectrum_plot};
 use super::source::{DeviceLists, device_combo};
 use super::{Palette, card, enabled, fmt_time, grid, placeholder, row_label, value};
-use crate::settings::{DataSource, NOISE_CHOICES, PicFormat, Pixels, Settings, TxChannelChoice, TxKind, TxOutputKind};
+use crate::settings::{AIR_CHOICES, DataSource, NOISE_CHOICES, PicFormat, Pixels, Settings, TxChannelChoice, TxKind, TxOutputKind};
 use crate::transmitter::TxSession;
 use cofdmtv_engine::cofdmtv_core::coding::{base37, base40};
 use cofdmtv_engine::cofdmtv_core::cofdmtv::multiframe;
 use cofdmtv_engine::cofdmtv_core::cofdmtv::{IMAGE_BYTES, Mode, RATES, SYMBOL_SECONDS, TEXT_BYTES, TxRequest};
-use cofdmtv_engine::cofdmtv_core::modem::{self, CodeRate, ModemMode, ModemRequest, Modulation};
+use cofdmtv_engine::cofdmtv_core::modem::{self, CodeRate, ModemMode, ModemRequest, Modulation, transmission_seconds};
 use cofdmtv_engine::receiver::cofdmtv_bandwidth;
-use cofdmtv_engine::{OutputSpec, TxConfig, TxJob};
+use cofdmtv_engine::{OutputSpec, TxConfig, TxJob, v2};
 use cofdmtv_pix::{PIXEL_CHOICES, Source};
 use eframe::egui::{self, Color32, ColorImage, ComboBox, RichText, TextureHandle, TextureOptions, Ui};
 use std::ops::RangeInclusive;
@@ -37,7 +37,8 @@ struct PrepKey {
     generation: u64,
     format: PicFormat,
     pixels: Pixels,
-    blocks: u8,
+    /// Bytes the picture may have.
+    budget: usize,
     as_is: bool,
 }
 
@@ -165,12 +166,7 @@ impl TxPage {
     }
 
     fn key(&self, settings: &Settings) -> PrepKey {
-        PrepKey { generation: self.generation, format: settings.format, pixels: settings.pixels, blocks: settings.blocks, as_is: settings.send_as_is }
-    }
-
-    /// Byte budget for the picture.
-    fn budget(blocks: u8) -> usize {
-        if blocks <= 1 { IMAGE_BYTES } else { usize::from(blocks) * multiframe::BLOCK_DATA }
+        PrepKey { generation: self.generation, format: settings.format, pixels: settings.pixels, budget: picture_budget(settings), as_is: settings.send_as_is }
     }
 
     /// A picture is being prepared (or about to be): Transmit has to wait.
@@ -222,7 +218,7 @@ impl TxPage {
 
 /// The preparation itself (on its own thread).
 fn prepare(src: &Source, key: &PrepKey) -> Result<PrepResult, String> {
-    let budget = TxPage::budget(key.blocks);
+    let budget = key.budget;
     if key.as_is
         && let Some(o) = src.original_if_fits(budget)
     {
@@ -246,15 +242,44 @@ fn preview_of(bytes: &[u8]) -> Option<ColorImage> {
     Some(ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
 }
 
+/// Bytes the picture may have: one frame, the blocks of a multi-frame picture, or what a
+/// v2 picture's air time holds.
+fn picture_budget(settings: &Settings) -> usize {
+    if settings.picture_v2 {
+        v2_plan(settings).budget
+    } else if settings.blocks <= 1 {
+        IMAGE_BYTES
+    } else {
+        usize::from(settings.blocks) * multiframe::BLOCK_DATA
+    }
+}
+
+/// The modem's noise symbols for the lead-in set (v2 pictures).
+fn v2_lead_in(settings: &Settings) -> usize {
+    v2::lead_in_symbols(v2::lead_in_seconds(settings.noise_symbols))
+}
+
+/// How a v2 picture fits the air time set.
+fn v2_plan(settings: &Settings) -> v2::Plan {
+    v2::plan(settings.v2_mode, f64::from(settings.v2_air_s), v2_lead_in(settings), settings.fancy_header, usize::from(settings.extra_frames))
+}
+
+/// Blocks and frames of a v2 picture of `len` bytes.
+fn v2_frame_count(len: usize, settings: &Settings) -> (usize, usize) {
+    let blocks = multiframe::blocks_in(len, settings.v2_mode.data_bytes());
+    (blocks, blocks + v2_plan(settings).extra())
+}
+
 /// The rate the signal will be built at, for the carrier limits.
 fn signal_rate(settings: &Settings) -> u32 {
-    let rates: &[u32] = if settings.tx_kind.is_modem() { &modem::RATES } else { &RATES };
+    let rates: &[u32] = if settings.modem_signal() { &modem::RATES } else { &RATES };
     settings.tx_rate.filter(|r| rates.contains(r)).unwrap_or(48_000)
 }
 
-/// The COFDMTV mode of what is to be sent (`None`: data over the modem).
+/// The COFDMTV mode of what is to be sent (`None`: over the modem, data or a v2 picture).
 fn mode_of(settings: &Settings) -> Option<Mode> {
     match settings.tx_kind {
+        TxKind::Picture if settings.picture_v2 => None,
         TxKind::Picture => Some(Mode::Image(settings.tx_mode)),
         TxKind::Text => Some(Mode::text_for(settings.text.len().max(1)).unwrap_or(Mode::Text(14))),
         TxKind::Ping => Some(Mode::Ping),
@@ -281,7 +306,7 @@ fn data_carrier_range(settings: &Settings) -> RangeInclusive<i32> {
 
 /// The call sign as it will go out, or why it cannot.
 fn call_sign_check(settings: &Settings) -> Result<String, String> {
-    if settings.tx_kind.is_modem() {
+    if settings.modem_signal() {
         base40::check(&settings.call_sign).map(base40::decode)
     } else {
         base37::check(&settings.call_sign).map(|()| base37::decode(base37::encode(&settings.call_sign)))
@@ -310,12 +335,12 @@ impl TxPage {
             grid(ui, "station", |ui| {
                 row_label(ui, "Call sign");
                 ui.horizontal(|ui| {
-                    let edit = egui::TextEdit::singleline(&mut settings.call_sign).desired_width(140.0).char_limit(base37::MAX_LEN).font(egui::TextStyle::Monospace);
-                    let hint = if settings.tx_kind.is_modem() {
+                    let hint = if settings.modem_signal() {
                         "Letters, digits and /, up to nine (the modem's base 40: space, /, 0–9, A–Z)"
                     } else {
                         "Letters and digits, up to nine (base 37: space, 0–9, A–Z)"
                     };
+                    let edit = egui::TextEdit::singleline(&mut settings.call_sign).desired_width(140.0).char_limit(base37::MAX_LEN).font(egui::TextStyle::Monospace);
                     ui.add(edit).on_hover_text(hint);
                     match call_sign_check(settings) {
                         Ok(call) => ui.label(RichText::new(call.trim().to_string()).weak()),
@@ -494,6 +519,39 @@ impl TxPage {
                 }
             });
             ui.end_row();
+            if settings.picture_v2 {
+                row_label(ui, "Air time");
+                ui.horizontal(|ui| {
+                    ComboBox::from_id_salt("v2_air")
+                        .selected_text(format!("{} s", settings.v2_air_s))
+                        .show_ui(ui, |ui| {
+                            for t in AIR_CHOICES {
+                                ui.selectable_value(&mut settings.v2_air_s, t, format!("{t} s"));
+                            }
+                        })
+                        .response
+                        .on_hover_text("How long the picture may take on the air: it is compressed to fill that time in the v2 mode below");
+                    ui.label("+");
+                    ui.add(egui::DragValue::new(&mut settings.extra_frames).range(0..=12)).on_hover_text("Extra frames: lose up to this many and the picture still arrives");
+                    ui.label("extra");
+                });
+                ui.end_row();
+                let plan = v2_plan(settings);
+                let extra = if plan.extra() > 0 { format!(" + {} extra", plan.extra()) } else { String::new() };
+                row_label(ui, "");
+                ui.label(
+                    RichText::new(format!(
+                        "up to {} bytes: {} frame{} of {} bytes{extra}, {:.0} s",
+                        plan.budget,
+                        plan.blocks,
+                        if plan.blocks == 1 { "" } else { "s" },
+                        settings.v2_mode.data_bytes(),
+                        plan.seconds
+                    ))
+                    .weak(),
+                );
+                ui.end_row();
+            } else {
             row_label(ui, "Frames");
             ui.horizontal(|ui| {
                 let label = |b: u8| if b <= 1 { "1 frame (5380 bytes)".to_string() } else { format!("{b} blocks ({} bytes)", usize::from(b) * multiframe::BLOCK_DATA) };
@@ -511,15 +569,19 @@ impl TxPage {
                 }
             });
             ui.end_row();
+            }
             row_label(ui, "");
             ui.checkbox(&mut settings.send_as_is, "Send the file unchanged if it fits");
             ui.end_row();
         });
         if let Some((_, p)) = &self.prepared {
-            let budget = Self::budget(settings.blocks);
+            let budget = picture_budget(settings);
             ui.add_space(4.0);
             let used = p.file.len() as f32 / budget as f32;
-            let frames = if settings.blocks > 1 {
+            let frames = if settings.picture_v2 {
+                let (blocks, frames) = v2_frame_count(p.file.len(), settings);
+                format!(" · {frames} frame{}, any {blocks} rebuild it", if frames == 1 { "" } else { "s" })
+            } else if settings.blocks > 1 {
                 let n = multiframe::blocks_for(p.file.len());
                 format!(" · {} frames", n + usize::from(settings.extra_frames))
             } else {
@@ -643,6 +705,10 @@ impl TxPage {
 
     /// Seconds on the air for what is set up.
     fn air_time(&self, settings: &Settings) -> f64 {
+        if settings.tx_kind == TxKind::Picture && settings.picture_v2 {
+            let frames = self.prepared.as_ref().map_or(v2_plan(settings).frames, |(_, p)| v2_frame_count(p.file.len(), settings).1);
+            return transmission_seconds(settings.v2_mode, frames, v2_lead_in(settings), settings.fancy_header);
+        }
         let Some(mode) = mode_of(settings) else {
             let m = settings.data_mode;
             let frames = match (settings.data_source, &self.data) {
@@ -763,8 +829,24 @@ impl TxPage {
                 };
                 let n = frames.len();
                 let label = format!("{what}{}, {}", if n > 1 { format!(" in {n} frames") } else { String::new() }, mode.label());
-                let request = ModemRequest { mode, call_sign: call_sign.clone(), carrier_hz: settings.data_carrier_hz, frames };
+                let request = ModemRequest::new(mode, call_sign.clone(), settings.data_carrier_hz, frames);
                 (vec![TxJob::modem(label.clone(), request, 0.0)], label)
+            }
+            TxKind::Picture if settings.picture_v2 => {
+                let Some((_, p)) = &self.prepared else { return };
+                let mode = settings.v2_mode;
+                match v2::frames(&p.file, mode, v2_plan(settings).extra()) {
+                    Ok(frames) => {
+                        let n = frames.len();
+                        let label = format!("v2 picture, {} bytes in {n} frame{}, {}", p.file.len(), if n == 1 { "" } else { "s" }, mode.label());
+                        let request = v2::request(mode, call_sign.clone(), settings.data_carrier_hz, frames, v2_lead_in(settings), settings.fancy_header);
+                        (vec![TxJob::modem(label.clone(), request, 0.0)], label)
+                    }
+                    Err(e) => {
+                        tx.error = Some(e);
+                        return;
+                    }
+                }
             }
             TxKind::Picture => {
                 let Some((_, p)) = &self.prepared else { return };
@@ -819,6 +901,16 @@ fn text(ui: &mut Ui, settings: &mut Settings) {
 fn signal_card(ui: &mut Ui, settings: &mut Settings) {
     card(ui, "Signal", "how it sounds on the air", |ui| {
         grid(ui, "signal", |ui| {
+            if settings.tx_kind == TxKind::Picture {
+                row_label(ui, "Modes");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut settings.picture_v2, false, "COFDMTV 6–13").on_hover_text("Shredpix's picture modes, which Assempix receives");
+                    ui.selectable_value(&mut settings.picture_v2, true, "v2").on_hover_text(
+                        "The picture in aicodix modem frames, in any modulation and code rate, with the lead-in and the fancy header (COFDMtv receives it)",
+                    );
+                });
+                ui.end_row();
+            }
             match mode_of(settings) {
                 Some(mode) => cofdmtv_signal(ui, settings, mode),
                 None => modem_signal(ui, settings),
@@ -858,6 +950,11 @@ fn cofdmtv_signal(ui: &mut Ui, settings: &mut Settings, mode: Mode) {
         ui.label(RichText::new(format!("{:.0}…{:.0} Hz", settings.carrier_hz as f32 - half, settings.carrier_hz as f32 + half)).weak());
     });
     ui.end_row();
+    lead_in_and_header(ui, settings);
+}
+
+/// The lead-in and the fancy header: rows of the signal grid (COFDMTV and v2 pictures).
+fn lead_in_and_header(ui: &mut Ui, settings: &mut Settings) {
     row_label(ui, "Lead-in");
     let label = NOISE_CHOICES.iter().find(|(n, _)| *n == settings.noise_symbols).map_or("custom", |(_, l)| l);
     ComboBox::from_id_salt("noise").selected_text(label).show_ui(ui, |ui| {
@@ -873,12 +970,13 @@ fn cofdmtv_signal(ui: &mut Ui, settings: &mut Settings, mode: Mode) {
     ui.end_row();
 }
 
-/// Mode (modulation, code rate, frame size) and carrier of a modem transmission: rows of
-/// the signal grid.
+/// Mode (modulation, code rate, frame size) and carrier of a modem transmission, data or a
+/// v2 picture (with its lead-in and fancy header): rows of the signal grid.
 fn modem_signal(ui: &mut Ui, settings: &mut Settings) {
+    let picture = settings.tx_kind == TxKind::Picture;
     row_label(ui, "Mode");
     ui.horizontal(|ui| {
-        let m = &mut settings.data_mode;
+        let m = if picture { &mut settings.v2_mode } else { &mut settings.data_mode };
         ComboBox::from_id_salt("data_modulation").width(80.0).selected_text(m.modulation.name()).show_ui(ui, |ui| {
             for x in Modulation::ALL {
                 ui.selectable_value(&mut m.modulation, x, x.name());
@@ -901,7 +999,7 @@ fn modem_signal(ui: &mut Ui, settings: &mut Settings) {
         .on_hover_text("Frame size: normal frames carry two to four times as much as short ones");
     });
     ui.end_row();
-    let m = settings.data_mode;
+    let m = if picture { settings.v2_mode } else { settings.data_mode };
     row_label(ui, "");
     ui.label(RichText::new(format!("{} bytes a frame · {:.1} s · {:.1} kbit/s", m.data_bytes(), m.duration_s(), m.bitrate() / 1000.0)).weak());
     ui.end_row();
@@ -916,9 +1014,13 @@ fn modem_signal(ui: &mut Ui, settings: &mut Settings) {
         ui.label(RichText::new(format!("{}…{} Hz", settings.data_carrier_hz - half, settings.data_carrier_hz + half)).weak());
     });
     ui.end_row();
-    row_label(ui, "");
-    ui.label(RichText::new("The modem starts with a noise symbol of its own: no lead-in or fancy header.").weak().small());
-    ui.end_row();
+    if picture {
+        lead_in_and_header(ui, settings);
+    } else {
+        row_label(ui, "");
+        ui.label(RichText::new("The modem starts with a noise symbol of its own: no lead-in or fancy header.").weak().small());
+        ui.end_row();
+    }
 }
 
 fn mode_line(mode: Mode) -> String {
@@ -963,7 +1065,7 @@ fn output_card(ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) 
             }
             row_label(ui, "Sample rate");
             let label = |r: Option<u32>| r.map_or_else(|| "Automatic".to_string(), |r| format!("{} Hz", r));
-            let rates: &[u32] = if settings.tx_kind.is_modem() { &modem::RATES } else { &RATES };
+            let rates: &[u32] = if settings.modem_signal() { &modem::RATES } else { &RATES };
             ComboBox::from_id_salt("tx_rate").selected_text(label(settings.tx_rate)).show_ui(ui, |ui| {
                 ui.selectable_value(&mut settings.tx_rate, None, "Automatic").on_hover_text("The sound card's rate (files: 48 kHz)");
                 for &r in rates {

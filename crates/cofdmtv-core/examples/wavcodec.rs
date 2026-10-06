@@ -203,7 +203,7 @@ fn modem_encode(args: &[String]) -> Result<(), String> {
         }).map_err(|e| format!("{f}: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
     let mut enc = ModemEncoder::new(rate).ok_or(format!("unsupported rate {rate}"))?;
-    enc.configure(&ModemRequest { mode, call_sign: call.clone(), carrier_hz: num(offset)? as i32, frames })?;
+    enc.configure(&ModemRequest::new(mode, call.clone(), num(offset)? as i32, frames))?;
     let float = num(bits)? == 32;
     let spec = hound::WavSpec {
         channels,

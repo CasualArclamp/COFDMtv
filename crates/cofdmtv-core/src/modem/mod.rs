@@ -24,7 +24,7 @@ mod decoder;
 mod encoder;
 
 pub use decoder::{ModemCodeword, ModemDecoder, ModemEvent, Datagram, decode_datagram};
-pub use encoder::{ModemEncoder, ModemRequest};
+pub use encoder::{ModemEncoder, ModemRequest, transmission_seconds};
 
 use crate::coding::psk::Psk;
 use crate::coding::qam::Qam;

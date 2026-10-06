@@ -32,6 +32,7 @@ datagrams, transmit and receive, in Rust, with DecDRM's look (`F:\DRM`). Read
 - CLI: `cargo run --release -p cofdmtv-cli -- rx FILE|--device NAME`,
   `… -- tx picture IMG|text TEXT|ping --call CALL (-o FILE | --device NAME)`,
   `… -- tx data FILE|--text TEXT [--modulation qam16 --code-rate 1/2 --frame short]`,
+  `… -- tx picture IMG --v2 [--modulation … --air-time 30]` (v2 picture modes),
   `… -- devices`.
 - GUI test runs: `--config` with a `save_dir` under `out/`, `--no-audio`, `--start` /
   `--transmit`, `--exit-after N --screenshot out/….png`.

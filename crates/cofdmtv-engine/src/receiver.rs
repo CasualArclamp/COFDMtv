@@ -597,7 +597,7 @@ fn decode_worker(jobs: &Rx<Job>, events: &Sender<RxEvent>, decoding: &AtomicBool
                     log(format!("{:>9}  text, {} bytes, {} bits corrected ({ms} ms): {}", p.call, p.data.len(), p.flips, msg.text));
                     emit_text(events, &save_dir, msg);
                 } else {
-                    let arrived = Arrived { call: p.call, label, flips: Some(p.flips), snr_db: p.snr_db, cfo_hz: p.cfo_hz, ms };
+                    let arrived = Arrived { call: p.call, label, picture_label: None, flips: Some(p.flips), snr_db: p.snr_db, cfo_hz: p.cfo_hz, ms };
                     match frames.push(&p.data) {
                         Progress::NotMultiFrame => {
                             let (_, file) = payload::picture_bytes(&p.data);
@@ -617,7 +617,8 @@ fn decode_worker(jobs: &Rx<Job>, events: &Sender<RxEvent>, decoding: &AtomicBool
                     decoding.store(false, Ordering::Relaxed);
                     continue;
                 };
-                let arrived = Arrived { call: d.call.clone(), label, flips: None, snr_db: d.snr_db.1, cfo_hz: d.cfo_hz, ms };
+                let picture_label = Some(format!("v2 {}", cw.mode.label()));
+                let arrived = Arrived { call: d.call.clone(), label, picture_label, flips: None, snr_db: d.snr_db.1, cfo_hz: d.cfo_hz, ms };
                 if modem_frames.chunk() != d.data.len() {
                     modem_frames = Reassembler::new(d.data.len(), multiframe::MAX_BLOCKS_ANY);
                 }
@@ -659,6 +660,8 @@ fn decode_worker(jobs: &Rx<Job>, events: &Sender<RxEvent>, decoding: &AtomicBool
 struct Arrived {
     call: String,
     label: String,
+    /// How a picture that came this way is labelled (pictures over the modem: v2).
+    picture_label: Option<String>,
     flips: Option<u32>,
     snr_db: f32,
     cfo_hz: f32,
@@ -723,7 +726,7 @@ fn emit_file(events: &Sender<RxEvent>, save_dir: &Option<PathBuf>, a: &Arrived, 
         let _ = events.send(RxEvent::Picture(Picture {
             time: now,
             call: a.call.clone(),
-            label: a.label.clone(),
+            label: a.picture_label.clone().unwrap_or_else(|| a.label.clone()),
             frames,
             kind,
             data,

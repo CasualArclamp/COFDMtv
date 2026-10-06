@@ -7,6 +7,7 @@
 //! cofdmtv tx picture photo.jpg --call DL1ABC -o picture.wav
 //! cofdmtv tx text "Hello" --call DL1ABC --device "CABLE-A Input"
 //! cofdmtv tx data report.pdf --modulation qam16 --frame normal --call DL1ABC -o data.wav
+//! cofdmtv tx picture photo.jpg --v2 --modulation qam64 --frame normal --air-time 30 -o v2.wav
 //! cofdmtv devices
 //! ```
 
@@ -16,7 +17,7 @@ use cofdmtv_engine::cofdmtv_core::cofdmtv::multiframe;
 use cofdmtv_engine::cofdmtv_core::cofdmtv::{IMAGE_BYTES, Mode, RATES, TEXT_BYTES, TxRequest};
 use cofdmtv_engine::cofdmtv_core::modem::{self, CodeRate, ModemMode, ModemRequest, Modulation};
 use cofdmtv_engine::cofdmtv_io::{list_input_devices, list_output_devices};
-use cofdmtv_engine::{ChannelSel, InputSpec, OutputSpec, Receiver, RxConfig, RxEvent, TxChannel, TxConfig, TxEvent, TxJob, Transmitter};
+use cofdmtv_engine::{ChannelSel, InputSpec, OutputSpec, Receiver, RxConfig, RxEvent, TxChannel, TxConfig, TxEvent, TxJob, Transmitter, v2};
 use cofdmtv_pix::{Format, PIXEL_CHOICES, Source};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -109,8 +110,18 @@ struct PictureArgs {
     /// The picture file.
     file: PathBuf,
     /// Picture mode: 6, 7 (8PSK), 8, 9 (QPSK), 10, 11 (8PSK), 12, 13 (QPSK).
-    #[arg(long, default_value_t = 11, value_parser = clap::value_parser!(u8).range(6..=13))]
+    #[arg(long, default_value_t = 11, value_parser = clap::value_parser!(u8).range(6..=13), conflicts_with = "v2")]
     mode: u8,
+    /// A v2 mode: the picture in aicodix modem frames (--modulation, --code-rate,
+    /// --frame) after the lead-in (--noise) and before the fancy header, compressed to
+    /// fill --air-time, with --extra frames.
+    #[arg(long)]
+    v2: bool,
+    #[command(flatten)]
+    modcod: ModcodArgs,
+    /// Seconds a v2 picture may take on the air.
+    #[arg(long, default_value_t = 30.0, requires = "v2")]
+    air_time: f64,
     /// Compression.
     #[arg(long, value_enum, default_value_t = PicFormat::Webp)]
     format: PicFormat,
@@ -119,9 +130,9 @@ struct PictureArgs {
     #[arg(long, default_value = "auto")]
     pixels: String,
     /// Data blocks (1 = one frame; up to 12 for a multi-frame picture Assempix rebuilds).
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=12))]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=12), conflicts_with = "v2")]
     blocks: u8,
-    /// Extra frames of a multi-frame picture (any `blocks` of the frames rebuild it).
+    /// Extra frames of a multi-frame or v2 picture (any `blocks` of the frames rebuild it).
     #[arg(long, default_value_t = 1)]
     extra: u8,
     /// Re-compress even if the file already fits.
@@ -145,19 +156,48 @@ struct DataArgs {
     /// Send this text (one datagram) instead of a file.
     #[arg(long)]
     text: Option<String>,
-    /// Modulation.
+    #[command(flatten)]
+    modcod: ModcodArgs,
+    /// Extra frames for a file (any `blocks` of the frames rebuild it); default: 1 if the
+    /// file takes more than one frame, else 0.
+    #[arg(long)]
+    extra: Option<u16>,
+}
+
+/// A modem mode: modulation, code rate, frame size.
+#[derive(Args)]
+struct ModcodArgs {
+    /// Modulation (modem data and v2 pictures).
     #[arg(long, value_enum, default_value_t = ModArg::Qam16)]
     modulation: ModArg,
-    /// Code rate.
+    /// Code rate (modem data and v2 pictures).
     #[arg(long, value_enum, default_value_t = RateArg::Half)]
     code_rate: RateArg,
     /// Frame size (normal frames carry two to four times as much).
     #[arg(long, value_enum, default_value_t = FrameArg::Short)]
     frame: FrameArg,
-    /// Extra frames for a file (any `blocks` of the frames rebuild it); default: 1 if the
-    /// file takes more than one frame, else 0.
-    #[arg(long)]
-    extra: Option<u16>,
+}
+
+impl ModcodArgs {
+    fn mode(&self) -> ModemMode {
+        let modulation = match self.modulation {
+            ModArg::Bpsk => Modulation::Bpsk,
+            ModArg::Qpsk => Modulation::Qpsk,
+            ModArg::Psk8 => Modulation::Psk8,
+            ModArg::Qam16 => Modulation::Qam16,
+            ModArg::Qam64 => Modulation::Qam64,
+            ModArg::Qam256 => Modulation::Qam256,
+            ModArg::Qam1024 => Modulation::Qam1024,
+            ModArg::Qam4096 => Modulation::Qam4096,
+        };
+        let rate = match self.code_rate {
+            RateArg::Half => CodeRate::Half,
+            RateArg::TwoThirds => CodeRate::TwoThirds,
+            RateArg::ThreeQuarters => CodeRate::ThreeQuarters,
+            RateArg::FiveSixths => CodeRate::FiveSixths,
+        };
+        ModemMode { modulation, rate, normal: matches!(self.frame, FrameArg::Normal) }
+    }
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -196,13 +236,14 @@ struct TxCommon {
     /// Your call sign (letters and digits, up to nine).
     #[arg(long, global = true, default_value = "ANONYMOUS")]
     call: String,
-    /// Carrier (centre) frequency, Hz [default: 1700; data: 1500, a multiple of 300].
+    /// Carrier (centre) frequency, Hz [default: 1700; data and v2: 1500, a multiple of 300].
     #[arg(long, global = true, allow_hyphen_values = true)]
     carrier: Option<i32>,
-    /// Seconds of noise before each COFDMTV transmission (rounded to 180 ms symbols).
+    /// Seconds of noise before each COFDMTV transmission or v2 picture (in whole symbols).
     #[arg(long, global = true, default_value_t = 1.0)]
     noise: f64,
-    /// Leave out the call sign drawn on the waterfall after each COFDMTV transmission.
+    /// Leave out the call sign drawn on the waterfall after each COFDMTV transmission or
+    /// v2 picture.
     #[arg(long, global = true)]
     no_fancy: bool,
     /// Write to this file (WAV or FLAC) instead of a sound card.
@@ -211,7 +252,7 @@ struct TxCommon {
     /// Sound-card output (name or a unique part of it); the system default if omitted.
     #[arg(long, global = true, conflicts_with = "out")]
     device: Option<String>,
-    /// Sample rate of the signal (8000, 16000, 32000, 44100, 48000; data: 44100, 48000);
+    /// Sample rate of the signal (8000, 16000, 32000, 44100, 48000; data and v2: 44100, 48000);
     /// default: the sound card's, or 48000 for files.
     #[arg(long, global = true)]
     rate: Option<u32>,
@@ -329,7 +370,12 @@ fn rx(a: RxArgs) -> Result<()> {
 
 fn tx(a: TxArgs) -> Result<()> {
     let c = &a.common;
-    let rates: &[u32] = if matches!(a.what, TxWhat::Data(_)) { &modem::RATES } else { &RATES };
+    let modem_signal = match &a.what {
+        TxWhat::Data(_) => true,
+        TxWhat::Picture(p) => p.v2,
+        _ => false,
+    };
+    let rates: &[u32] = if modem_signal { &modem::RATES } else { &RATES };
     if let Some(r) = c.rate
         && !rates.contains(&r)
     {
@@ -345,6 +391,7 @@ fn tx(a: TxArgs) -> Result<()> {
             let request = TxRequest { payload: text.as_bytes().to_vec(), ..cofdmtv_request(c, Mode::Text(0), iq)? };
             vec![TxJob::cofdmtv("text", request, 0.0)]
         }
+        TxWhat::Picture(p) if p.v2 => vec![picture_v2_job(p, c, iq)?],
         TxWhat::Picture(p) => picture_jobs(p, c, iq)?,
         TxWhat::Data(d) => vec![data_job(d, c, iq)?],
     };
@@ -404,9 +451,48 @@ fn picture_jobs(p: &PictureArgs, c: &TxCommon, iq: bool) -> Result<Vec<TxJob>> {
     let mode = Mode::Image(p.mode);
     let template = cofdmtv_request(c, mode, iq)?;
     let request = |payload| TxRequest { payload, ..template.clone() };
-    let src = Source::open(&p.file).map_err(|e| anyhow!(e))?;
     let blocks = usize::from(p.blocks);
     let budget = if blocks == 1 { IMAGE_BYTES } else { blocks * multiframe::BLOCK_DATA };
+    let file = picture_file(p, budget)?;
+    if blocks == 1 && file.len() <= IMAGE_BYTES {
+        return Ok(vec![TxJob::cofdmtv("picture", request(file), 0.0)]);
+    }
+    let needed = multiframe::blocks_for(file.len());
+    let frames = multiframe::split(&file, needed + usize::from(p.extra)).map_err(|e| anyhow!(e))?;
+    eprintln!("{} bytes in {} frames (any {needed} rebuild the picture)", file.len(), frames.len());
+    let count = frames.len();
+    Ok(frames
+        .into_iter()
+        .enumerate()
+        .map(|(i, f)| TxJob::cofdmtv(format!("frame {} of {count}", i + 1), request(f), if i == 0 { 0.0 } else { 0.3 }))
+        .collect())
+}
+
+/// A picture in a v2 mode: modem frames after the lead-in and before the fancy header, the
+/// picture compressed to fill the air time (see `cofdmtv_engine::v2`).
+fn picture_v2_job(p: &PictureArgs, c: &TxCommon, iq: bool) -> Result<TxJob> {
+    let mode = p.modcod.mode();
+    let carrier = modem_carrier(c, iq)?;
+    let lead = v2::lead_in_symbols(c.noise);
+    let fancy = !c.no_fancy;
+    let plan = v2::plan(mode, p.air_time, lead, fancy, usize::from(p.extra));
+    let file = picture_file(p, plan.budget)?;
+    let frames = v2::frames(&file, mode, plan.extra()).map_err(|e| anyhow!(e))?;
+    let blocks = frames.len() - plan.extra();
+    eprintln!(
+        "{} bytes in {} {} frame{} (any {blocks} rebuild the picture), {:.1} s",
+        file.len(),
+        frames.len(),
+        mode.label(),
+        if frames.len() == 1 { "" } else { "s" },
+        modem::transmission_seconds(mode, frames.len(), lead, fancy)
+    );
+    Ok(TxJob::modem(format!("v2 picture, {}", mode.label()), v2::request(mode, c.call.clone(), carrier, frames, lead, fancy), 0.0))
+}
+
+/// The picture to send, as it is if it fits in `budget` bytes, else compressed to fit.
+fn picture_file(p: &PictureArgs, budget: usize) -> Result<Vec<u8>> {
+    let src = Source::open(&p.file).map_err(|e| anyhow!(e))?;
     let format = match p.format {
         PicFormat::Webp => Format::WebpLossy,
         PicFormat::WebpLossless => Format::WebpLossless,
@@ -434,47 +520,27 @@ fn picture_jobs(p: &PictureArgs, c: &TxCommon, iq: bool) -> Result<Vec<TxJob>> {
             e.bytes
         }
     };
-    if blocks == 1 && file.len() <= IMAGE_BYTES {
-        return Ok(vec![TxJob::cofdmtv("picture", request(file), 0.0)]);
-    }
-    let needed = multiframe::blocks_for(file.len());
-    let frames = multiframe::split(&file, needed + usize::from(p.extra)).map_err(|e| anyhow!(e))?;
-    eprintln!("{} bytes in {} frames (any {needed} rebuild the picture)", file.len(), frames.len());
-    let count = frames.len();
-    Ok(frames
-        .into_iter()
-        .enumerate()
-        .map(|(i, f)| TxJob::cofdmtv(format!("frame {} of {count}", i + 1), request(f), if i == 0 { 0.0 } else { 0.3 }))
-        .collect())
+    Ok(file)
 }
 
-/// A modem transmission: a text in one datagram, or a file in frames with a multi-frame
-/// header (its exact size and CRC go with it, and extra frames make up for lost ones).
-fn data_job(d: &DataArgs, c: &TxCommon, iq: bool) -> Result<TxJob> {
-    let modulation = match d.modulation {
-        ModArg::Bpsk => Modulation::Bpsk,
-        ModArg::Qpsk => Modulation::Qpsk,
-        ModArg::Psk8 => Modulation::Psk8,
-        ModArg::Qam16 => Modulation::Qam16,
-        ModArg::Qam64 => Modulation::Qam64,
-        ModArg::Qam256 => Modulation::Qam256,
-        ModArg::Qam1024 => Modulation::Qam1024,
-        ModArg::Qam4096 => Modulation::Qam4096,
-    };
-    let rate = match d.code_rate {
-        RateArg::Half => CodeRate::Half,
-        RateArg::TwoThirds => CodeRate::TwoThirds,
-        RateArg::ThreeQuarters => CodeRate::ThreeQuarters,
-        RateArg::FiveSixths => CodeRate::FiveSixths,
-    };
-    let mode = ModemMode { modulation, rate, normal: matches!(d.frame, FrameArg::Normal) };
+/// The modem's carrier: the one given, or its usual 1500 Hz; a multiple of 300 Hz within
+/// the band.
+fn modem_carrier(c: &TxCommon, iq: bool) -> Result<i32> {
     let carrier = c.carrier.unwrap_or(modem::DEFAULT_CARRIER_HZ);
     let range = modem::carrier_range(c.rate.unwrap_or(48_000), iq);
     if carrier % modem::CARRIER_STEP_HZ != 0 || !range.contains(&carrier) {
         bail!("carrier {carrier} Hz: the modem needs a multiple of {} Hz in {}…{} Hz here", modem::CARRIER_STEP_HZ, range.start(), range.end());
     }
+    Ok(carrier)
+}
+
+/// A modem transmission: a text in one datagram, or a file in frames with a multi-frame
+/// header (its exact size and CRC go with it, and extra frames make up for lost ones).
+fn data_job(d: &DataArgs, c: &TxCommon, iq: bool) -> Result<TxJob> {
+    let mode = d.modcod.mode();
+    let carrier = modem_carrier(c, iq)?;
     let size = mode.data_bytes();
-    let request = |frames| ModemRequest { mode, call_sign: c.call.clone(), carrier_hz: carrier, frames };
+    let request = |frames| ModemRequest::new(mode, c.call.clone(), carrier, frames);
     if let Some(text) = &d.text {
         if text.is_empty() || text.len() > size {
             bail!("{} bytes: a datagram of {} holds 1…{size}; pick a larger mode, or send a file", text.len(), mode.label());

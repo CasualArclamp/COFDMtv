@@ -187,6 +187,33 @@ impl Encoder {
         Ok(())
     }
 
+    /// Prepare only a fancy header — `call_sign` drawn into the waterfall in 11 lines,
+    /// then a silent symbol — at `carrier_hz`, drawn as after a picture (Shredpix's way):
+    /// for transmissions of another kind that end with one (v2 pictures over the modem).
+    /// Characters outside base 37 (the `/` a modem call sign may have) are left blank.
+    pub fn configure_fancy_header(&mut self, call_sign: &str, carrier_hz: i32) -> Result<(), String> {
+        // The header spans 216 carriers of 6.25 Hz around the carrier.
+        let half_bw = -super::FANCY_OFF * 25 / 4;
+        let rate = self.layout.rate as i32;
+        if carrier_hz.abs() + half_bw > rate / 2 {
+            return Err(format!("carrier {carrier_hz} Hz: the fancy header must stay within ±{} Hz", rate / 2));
+        }
+        self.text = false;
+        self.carrier_offset = (i64::from(carrier_hz) * self.layout.symbol_len as i64 / i64::from(self.layout.rate)) as i32;
+        self.call = [0; 9];
+        for (c, b) in self.call.iter_mut().zip(call_sign.trim().bytes()) {
+            *c = base37::digit(b);
+        }
+        self.guard.fill(Cplx::new(0.0, 0.0));
+        self.noise_count = 0;
+        self.fancy_line = 11;
+        self.symbol_count = 0;
+        self.step = Step::Fancy;
+        self.produced = 0;
+        self.total = self.fancy_line + 1;
+        Ok(())
+    }
+
     /// Symbols of the whole transmission (each [`Layout::extended_len`] samples).
     pub fn total_symbols(&self) -> usize {
         self.total

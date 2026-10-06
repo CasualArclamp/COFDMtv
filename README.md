@@ -16,7 +16,10 @@ aicodix's own apps and programs:
   [aicodix modem](https://github.com/aicodix/modem): BPSK to QAM4096, code rates 1/2 to
   5/6, short or normal frames, at 44.1 or 48 kHz; files in as many frames as they take
   (up to 1024: 250 kB in the smallest frames, 7 MB in the largest), extra frames making
-  up for lost ones.
+  up for lost ones;
+- **v2 picture modes** — pictures in modem frames of any modulation and code rate, with
+  COFDMTV's lead-in and fancy header and extra frames, compressed to fill the air time you
+  set (COFDMtv to COFDMtv).
 
 ![COFDMtv receiving a recording: the spectrum, the waterfall with the call signs of two transmissions' fancy headers, the QPSK constellation, the picture received, and messages from Rattlegram and the modem](docs/images/receiver.png)
 
@@ -51,10 +54,10 @@ may warn the first time ("More info" → "Run anyway"). On Linux, build from sou
   messages and pings, and files. Pictures and files are saved as Assempix names them
   (`20261005_213000_DL1ABC.jpg`), messages appended to `messages.txt`. COFDMTV and the
   modem are received at the same time (the modem at 44.1 and 48 kHz).
-- **Transmitter** — a picture (scaled and compressed to fit one frame or several, with a
-  preview of how it will arrive), a text, a ping, or data over the modem (a text or any
-  file); mode, carrier, lead-in and fancy header; to a sound card or a WAV/FLAC file,
-  mono, one channel or I/Q.
+- **Transmitter** — a picture (scaled and compressed to fit one frame or several, or in a
+  v2 mode the air time you set, with a preview of how it will arrive), a text, a ping, or
+  data over the modem (a text or any file); mode, carrier, lead-in and fancy header; to a
+  sound card or a WAV/FLAC file, mono, one channel or I/Q.
 
 <p>
   <img src="docs/images/modem.png" width="49%" alt="A picture arriving over the aicodix modem in six QAM256 frames: the spectrum, the waterfall, the QAM256 constellation building up, the picture and a text message">
@@ -88,6 +91,7 @@ cofdmtv tx picture large.jpg --call DL1ABC --blocks 3 --extra 1 --device "Speake
 cofdmtv tx text "Hello" --call DL1ABC --device "Speakers"
 cofdmtv tx data --text "Hello over the modem" --call DL1ABC/P -o text.wav
 cofdmtv tx data report.pdf --modulation qam64 --code-rate 2/3 --frame normal -o data.wav
+cofdmtv tx picture photo.jpg --v2 --modulation qam64 --frame normal --air-time 30 -o v2.wav
 cofdmtv devices
 ```
 
