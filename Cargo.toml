@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*"]
+# `cargo run` starts the desktop app; `cargo run -p cofdmtv-cli -- …` the command line,
+# `cargo build --workspace` builds both.
+default-members = ["apps/cofdmtv-gui"]
 
 [workspace.package]
 version = "0.1.3"

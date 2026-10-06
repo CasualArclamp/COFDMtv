@@ -689,7 +689,7 @@ impl TxPage {
                 ui.add(
                     egui::ProgressBar::new(fraction)
                         .desired_width(ui.available_width())
-                        .text(format!("{} of {} · symbol {} / {}", fmt_time(snap.seconds), fmt_time(snap.total_seconds), snap.symbol, snap.symbols)),
+                        .text(format!("{} of {} · symbol {} / {}", fmt_time(snap.seconds.min(snap.total_seconds)), fmt_time(snap.total_seconds), snap.symbol, snap.symbols)),
                 );
             } else if !tx.is_running() {
                 ui.label(RichText::new(format!("About {:.1} s on the air", self.air_time(settings))).weak());

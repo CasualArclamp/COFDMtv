@@ -67,6 +67,15 @@ may warn the first time ("More info" → "Run anyway"). On Linux, build from sou
 *Left: a picture arriving over the aicodix modem in six QAM256 frames. Right: sending it,
 seven frames of which any six rebuild the file.*
 
+<p>
+  <img src="docs/images/v2-transmitter.png" width="49%" alt="The transmitter in a v2 mode: QAM256 1/2 normal frames at 1500 Hz, an air time of 30 s that holds 18306 bytes in nine frames and an extra one, the test card compressed to a 17770-byte WebP to fill it">
+  <img src="docs/images/v2-receiver.png" width="49%" alt="The receiver with the v2 picture: the QAM256 constellation building up, the call sign DL1ABC drawn into the waterfall after the frames, the picture labelled v2 QAM256 1/2 normal">
+</p>
+
+*A v2 picture mode: 30 s of QAM256 1/2 normal frames hold the test card as a WebP at
+quality 96 (left), and the receiver rebuilds it from nine of the ten frames, the call sign
+drawn into the waterfall after them (right).*
+
 ![The payload constellation building up for QAM16, QAM64, QAM256 and QAM1024](docs/images/constellations.png)
 
 *The constellation builds up over the last symbols, a dozen for every point: QAM16,
@@ -99,21 +108,46 @@ cofdmtv devices
 
 ## Building
 
-With a current Rust toolchain (1.88 or later):
+You need Rust 1.88 or later ([rustup.rs](https://rustup.rs), or your distribution's `rust`
+package if it is that recent) and a C compiler, for libwebp.
+
+### Linux
+
+Install the build tools and the ALSA headers:
+
+| Distribution | Command |
+|---|---|
+| Arch | `sudo pacman -S --needed base-devel alsa-lib` |
+| Debian, Ubuntu | `sudo apt install build-essential pkg-config libasound2-dev` |
+| Fedora | `sudo dnf install gcc pkgconf-pkg-config alsa-lib-devel` |
+
+Then:
 
 ```
-cargo build --release
+git clone https://github.com/CasualArclamp/COFDMtv
+cd COFDMtv
+cargo run --release                            # the desktop app
+cargo run --release -p cofdmtv-cli -- --help   # the command line
+cargo build --release --workspace              # both, into target/release/
 ```
 
-gives `target/release/cofdmtv-gui` and `target/release/cofdmtv`. On Linux, cpal needs the
-ALSA headers (`libasound2-dev` and `pkg-config` on Debian and Ubuntu).
+The desktop app draws with OpenGL (Mesa) under X11 or Wayland. Sound goes through ALSA: on
+a PipeWire or PulseAudio system, install its ALSA plugin (`pipewire-alsa` or
+`pulseaudio-alsa` on Arch) so the sound cards show up as `default`, `pipewire` or `pulse`.
+The Open… dialogs come from the XDG desktop portal (`xdg-desktop-portal` with its `-gtk`
+or `-kde` backend), which most desktops have.
 
-Single-file Windows executables that need nothing installed (static C runtime):
+### Windows
+
+With Rust and the Visual Studio C++ build tools, `cargo run --release` starts the desktop
+app, as on Linux. Single-file executables that need nothing installed (static C runtime):
 `powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` writes them to
 `exe\`. Pushing a tag `vX.Y.Z` has GitHub Actions build them the same way, smoke-test
 them and attach them to a draft release (`.github/workflows/release.yml`).
 
-Tests: `cargo test --release --workspace` (loopback of every mode at every rate, signals
+### Tests
+
+`cargo test --release --workspace` (loopback of every mode at every rate, signals
 made by the originals in `tests/fixtures`, the engines end to end), and
 `scripts/smoke-test.sh target/release OUT_DIR` (the CLI and the GUI end to end, as CI runs
 it). `scripts/xcheck.sh` cross-checks against the original programs, built from clones of

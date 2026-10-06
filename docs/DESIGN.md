@@ -123,6 +123,10 @@ modes — maybe we will call these v2 modes." Asked how, the user chose:
 
 ## More choices
 
+- The GUI is the workspace's default member, so `cargo run --release` starts it (a user
+  on Arch got "could not determine which binary to run", 2026-10-06); CI, the release
+  workflow and the scripts name their packages or pass `--workspace`.
+
 - Sources at a rate the modems do not support are resampled to 48 kHz; the transmitter
   builds the signal at the sound card's rate when it is a rate of the system sent
   (COFDMTV's five, the modem's two; else 48 kHz and resamples), files at 48 kHz unless

@@ -29,6 +29,8 @@ datagrams, transmit and receive, in Rust, with DecDRM's look (`F:\DRM`). Read
   decoding both ways, waveforms sample by sample) and
   `bash scripts/sensitivity.sh [TRIALS] [multipath]` (also build aicodix/disorders into
   `target/cxx-reference`).
+- `cargo run --release` starts the GUI (the workspace's default member); plain `cargo
+  build`/`test` cover the GUI's package only, so name packages or pass `--workspace`.
 - CLI: `cargo run --release -p cofdmtv-cli -- rx FILE|--device NAME`,
   `… -- tx picture IMG|text TEXT|ping --call CALL (-o FILE | --device NAME)`,
   `… -- tx data FILE|--text TEXT [--modulation qam16 --code-rate 1/2 --frame short]`,
