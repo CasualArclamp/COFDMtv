@@ -174,5 +174,6 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
 - [x] M5 — aicodix modem datagrams: core (all 64 modes cross-checked both ways), engine
       (both decoders on one input), CLI `tx data`, GUI Data kind and Files tab.
 - [x] M6 — GitHub repository and CI, README with screenshots, portable executables
-      (`scripts/build-portable.ps1`; `release.yml` drafts a release from a pushed tag;
-      no release published yet).
+      (`scripts/build-portable.ps1`; `release.yml` drafts a release from a pushed tag).
+      v0.1.0 released 2026-10-06 (14e97f2; built, checked and smoke-tested by
+      `release.yml`, hashes verified, published as Latest).
