@@ -233,3 +233,4 @@ A picture in aicodix modem frames (`cofdmtv_engine::v2`):
       constellation without a grid, the README with pictures; the repository public.
 - [x] M7 — v2 picture modes: pictures in aicodix modem frames with a free modcod, lead-in,
       fancy header and extra frames, sized by air time (core, engine, CLI, GUI).
+      Released as v0.1.3 on 2026-10-06 (34e4f72).
