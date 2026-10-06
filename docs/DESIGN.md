@@ -184,4 +184,5 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
 - [x] M6 — GitHub repository and CI, README with screenshots, portable executables
       (`scripts/build-portable.ps1`; `release.yml` drafts a release from a pushed tag).
       v0.1.0 released 2026-10-06 (14e97f2; built, checked and smoke-tested by
-      `release.yml`, hashes verified, published as Latest).
+      `release.yml`, hashes verified, published). v0.1.1 the same day (55e9142): the
+      constellation builds up and zooms.
