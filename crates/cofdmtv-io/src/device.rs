@@ -85,6 +85,7 @@ pub fn list_output_devices() -> Result<Vec<DeviceInfo>> {
 /// Lists the devices of one direction on the default audio host (WASAPI on Windows, ALSA on
 /// Linux). A machine without sound cards yields an empty list, not an error.
 pub fn list_devices(direction: Direction) -> Result<Vec<DeviceInfo>> {
+    quiet_alsa();
     let host = cpal::default_host();
     let host_name = host.id().name().to_string();
     // On WASAPI the default device is a special handle that follows the system default (and
@@ -132,8 +133,21 @@ pub fn list_devices(direction: Direction) -> Result<Vec<DeviceInfo>> {
 
 /// Name of the system default device of `direction`, if there is one.
 pub fn default_device_name(direction: Direction) -> Option<String> {
+    quiet_alsa();
     default_device(&cpal::default_host(), direction).map(|d| device_name(&d))
 }
+
+/// alsa-lib writes to stderr whenever cpal, listing or opening sound cards, comes to one
+/// it cannot open: the OSS emulation's `/dev/dsp`, a JACK server that is not running, and
+/// the like. That is noise (cpal reports what fails), so on Linux this thread's alsa-lib
+/// messages go into a buffer instead, a fresh one each time.
+#[cfg(target_os = "linux")]
+fn quiet_alsa() {
+    let _ = alsa::Output::local_error_handler();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn quiet_alsa() {}
 
 fn default_device(host: &cpal::Host, direction: Direction) -> Option<cpal::Device> {
     match direction {
@@ -172,6 +186,7 @@ fn default_config(dev: &cpal::Device, direction: Direction) -> Result<SupportedS
 /// Finds a device by name: `None` selects the default device; otherwise an exact name or id
 /// match wins, then a unique case-insensitive substring of the name.
 pub(crate) fn find_device(direction: Direction, name: Option<&str>) -> Result<cpal::Device> {
+    quiet_alsa();
     let host = cpal::default_host();
     let Some(wanted) = name.map(str::trim).filter(|n| !n.is_empty()) else {
         return default_device(&host, direction).ok_or(Error::NoDefaultDevice(direction));

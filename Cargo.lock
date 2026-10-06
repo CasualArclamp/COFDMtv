@@ -564,6 +564,7 @@ dependencies = [
 name = "cofdmtv-io"
 version = "0.1.3"
 dependencies = [
+ "alsa",
  "cpal",
  "flacenc",
  "hound",
