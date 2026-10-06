@@ -316,4 +316,5 @@ A picture in aicodix modem frames (`cofdmtv_engine::v2`):
 - [x] M8 — v2 pictures shown as they arrive: systematic v2 frames (the picture first, in
       order), beginnings of WebP/JPEG/PNG decoded as far as they go, the GUI shows the
       picture from the top, the CLI the rows in; JPEG in v2 is progressive (mozjpeg), so
-      such a picture arrives whole and coarse first, then sharper.
+      such a picture arrives whole and coarse first, then sharper. Released as v0.1.5 on
+      2026-10-06 (ab064a1).
