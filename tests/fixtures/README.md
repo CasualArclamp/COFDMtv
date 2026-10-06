@@ -9,6 +9,7 @@ the reference programs' second of silence on either side cut to a quarter (text:
 |---|---|
 | `testcard.jpg` | 320×240 JPEG, 5345 bytes (fits one picture payload); drawn with Pillow |
 | `testcard_large.jpg` | 640×480 JPEG, 10594 bytes (two blocks of a multi-frame picture) |
+| `testcard_progressive.jpg` | `testcard.jpg` as a progressive JPEG, 6521 bytes (Pillow: quality 75, optimized, progressive) |
 | `shredpix_mode12.wav` | `shredpix_encode … 8000 12 DL1ABC 1700 1 1 0 testcard.jpg` (one noise symbol, fancy header) |
 | `shredpix_ping.wav` | `shredpix_encode … 8000 0 DL1ABC 1500 1 0 0` |
 | `rattlegram_text.txt` | the text of the next file (UTF-8) |

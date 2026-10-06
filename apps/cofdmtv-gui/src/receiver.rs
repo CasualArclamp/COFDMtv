@@ -134,6 +134,8 @@ impl Arriving {
     pub fn texture(&mut self, ctx: &egui::Context) -> Option<(&TextureHandle, u32)> {
         if std::mem::take(&mut self.stale)
             && let Some(p) = cofdmtv_pix::decode_partial(&self.head)
+            // Less than before (a cut no decoder takes): keep what is shown.
+            && self.shown.as_ref().is_none_or(|(_, rows)| p.rows >= *rows)
         {
             let size = [p.image.width() as usize, p.image.height() as usize];
             let image = ColorImage::from_rgba_unmultiplied(size, p.image.as_raw());

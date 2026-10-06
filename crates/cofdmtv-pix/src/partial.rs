@@ -6,7 +6,8 @@
 //! from the top once the headers are in — for a lossy picture that includes the first
 //! partition (every macroblock's prediction modes), a tenth to a third of the file. JPEG
 //! goes through image's decoder (zune-jpeg), which decodes a file cut short as far as it
-//! goes and fills the rest with mid-gray; PNG row by row with the png crate.
+//! goes and fills the rest with mid-gray — a progressive JPEG's first scans give the
+//! whole picture, coarse; PNG row by row with the png crate.
 
 use image::{ImageFormat, RgbaImage};
 use std::io::Cursor;
@@ -84,12 +85,22 @@ fn webp_rows(head: &[u8]) -> Option<Partial> {
 const MCU_ROWS: u32 = 16;
 
 fn jpeg_rows(head: &[u8]) -> Option<Partial> {
-    let mut image = image::load_from_memory_with_format(head, ImageFormat::Jpeg).ok()?.to_rgba8();
+    let decode = |bytes: &[u8]| image::load_from_memory_with_format(bytes, ImageFormat::Jpeg).ok();
+    // Cut short within the tables or the header of a progressive JPEG's next scan, it
+    // decodes up to the scans before.
+    let mut image = decode(head).or_else(|| decode(before_last_segment(head)?))?.to_rgba8();
     let (w, h) = image.dimensions();
     let gray = image.rows().rev().take_while(|row| row.clone().all(|p| p.0 == [128, 128, 128, 255])).count() as u32;
     let rows = if gray == 0 { h } else { (h - gray).saturating_sub(MCU_ROWS) };
     image.as_mut()[(rows * w * 4) as usize..].fill(0);
     Some(Partial { image, rows })
+}
+
+/// `head` up to the last marker segment that can come between two scans (DHT, SOS, DQT,
+/// DRI), where a cut leaves it unreadable.
+fn before_last_segment(head: &[u8]) -> Option<&[u8]> {
+    let at = head.windows(2).rposition(|w| w[0] == 0xFF && matches!(w[1], 0xC4 | 0xDA | 0xDB | 0xDD))?;
+    Some(&head[..at])
 }
 
 fn png_rows(head: &[u8]) -> Option<Partial> {
@@ -192,6 +203,30 @@ mod tests {
         let png = encode_at(&img, Format::Png, 100).unwrap();
         let rows = grows(&png, 0);
         assert!(rows[5] > 0 && rows[5] < 240, "PNG: {rows:?}");
+    }
+
+    #[test]
+    fn a_progressive_jpeg_comes_whole_and_coarse_first() {
+        let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/testcard_progressive.jpg")).unwrap();
+        let full = crate::decode(&file).unwrap();
+        let error = |p: &Partial| {
+            let sq: f64 = p.image.as_raw().iter().zip(full.as_raw()).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+            (sq / full.as_raw().len() as f64).sqrt()
+        };
+        // Every cut after the frame header decodes, the whole picture once the first scan
+        // is in, closer to the whole file's the more there is.
+        let (mut whole_from, mut last) = (None, f64::MAX);
+        for n in (700..=file.len()).step_by(41).chain([file.len()]) {
+            let p = decode_partial(&file[..n]).unwrap_or_else(|| panic!("{n} bytes"));
+            if p.rows == full.height() {
+                whole_from.get_or_insert(n);
+                let e = error(&p);
+                assert!(e <= last + 1.0, "{n} bytes: {e} after {last}");
+                last = e;
+            }
+        }
+        assert!(whole_from.unwrap() < file.len() / 3, "{whole_from:?} of {}", file.len());
+        assert!(last < 0.5, "{last}");
     }
 
     #[test]
