@@ -142,7 +142,8 @@ image, waterfall model, font fallbacks, settings store, screenshot automation):
   symbol progress; level, position, counts) → plot tabs Overview / Spectrum / Waterfall /
   Constellation with a span choice (4 kHz, 8 kHz, full band; the waterfall keeps 6.25 Hz
   bins so the fancy header's call sign reads; the constellation shows the payload's
-  modulation, PSK or QAM, built up as BinModem's symbol scope does: the engine keeps
+  modulation, PSK or QAM, on the I and Q axes alone (no grid), built up as BinModem's
+  symbol scope does: the engine keeps
   the last symbols' points, a dozen per point of the modulation and at least 512
   (QAM4096: 49 152 points, the last 192 symbols; a new modulation starts afresh), and
   each is drawn as a faint square, so clusters grow where symbols keep landing; larger

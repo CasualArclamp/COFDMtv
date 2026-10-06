@@ -296,11 +296,13 @@ fn constellation(ui: &mut Ui, rx: &RxSession, pal: &Palette, side: f32, state: &
         let few = !snap.ideal.is_empty();
         let texture = (!snap.constellation.is_empty()).then(|| refresh(ui.ctx(), &mut state.image, &snap.constellation, texels, pal.points, few, view));
         let ideal: Vec<[f64; 2]> = snap.ideal.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
+        // No grid: only the I and Q axes through the centre, as BinModem's scope has.
         let plot = base_plot("constellation")
             .width(side)
             .height(side)
             .data_aspect(1.0)
             .show_axes(false)
+            .show_grid(false)
             .label_formatter(hover_label("I", 2, "Q", 2))
             .show(ui, |p| {
                 p.set_plot_bounds(PlotBounds::from_min_max(view.min(), view.max()));
