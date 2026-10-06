@@ -108,7 +108,8 @@ fn modem_text_and_file() {
 }
 
 /// A v2 picture: a lead-in, the picture in QAM256 frames sized by air time with an extra
-/// frame, the fancy header; the first frame lost. It arrives whole, labelled v2.
+/// frame, the fancy header; the third frame lost. Its beginning comes frame by frame until
+/// the gap, then the extra frame makes up for it: it arrives whole, labelled v2.
 #[test]
 fn v2_picture() {
     use cofdmtv_core::modem::{CodeRate, ModemMode, Modulation};
@@ -121,9 +122,20 @@ fn v2_picture() {
     let plan = v2::plan(mode, 30.0, lead, true, 1);
     assert!(plan.budget >= jpeg.len(), "{plan:?}");
     let frames = v2::frames(&jpeg, mode, plan.extra()).unwrap();
-    let request = v2::request(mode, "DL1ABC/P", 1500, frames[1..].to_vec(), lead, true);
+    let blocks = frames.len() - plan.extra();
+    assert!(blocks >= 4 && frames.len() == blocks + 1, "{plan:?}");
+    let sent: Vec<Vec<u8>> = frames.iter().enumerate().filter(|&(i, _)| i != 2).map(|(_, f)| f.clone()).collect();
+    let request = v2::request(mode, "DL1ABC/P", 1500, sent, lead, true);
     transmit(&wav, 48000, TxChannel::Mono, vec![TxJob::modem("v2 picture", request, 0.0)]);
     let events = receive(&wav, ChannelSel::Mix, None);
+    let heads: Vec<(usize, &[u8], &str)> =
+        events.iter().filter_map(|e| if let RxEvent::MultiFrame { have, head, label, .. } = e { Some((*have, head.as_slice(), label.as_str())) } else { None }).collect();
+    assert_eq!(heads.len(), blocks - 1, "every frame but the last that completes it");
+    let copy = jpeg.len().div_ceil(blocks);
+    for &(have, head, label) in &heads {
+        assert_eq!(head, &jpeg[..have.min(2) * copy], "frame {have}");
+        assert_eq!(label, "v2 QAM256 1/2 short");
+    }
     let picture = events.iter().find_map(|e| if let RxEvent::Picture(p) = e { Some(p) } else { None }).expect("the picture");
     assert_eq!(picture.data, jpeg);
     assert_eq!(picture.kind, Some(ImageKind::Jpeg));

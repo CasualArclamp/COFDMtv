@@ -906,7 +906,7 @@ fn signal_card(ui: &mut Ui, settings: &mut Settings) {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut settings.picture_v2, false, "COFDMTV 6–13").on_hover_text("Shredpix's picture modes, which Assempix receives");
                     ui.selectable_value(&mut settings.picture_v2, true, "v2").on_hover_text(
-                        "The picture in aicodix modem frames, in any modulation and code rate, with the lead-in and the fancy header (COFDMtv receives it)",
+                        "The picture in aicodix modem frames, in any modulation and code rate, with the lead-in and the fancy header (COFDMtv receives it, and shows it from the top as the frames arrive)",
                     );
                 });
                 ui.end_row();

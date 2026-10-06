@@ -13,3 +13,7 @@ rust-version.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif", "tiff"] }
 # Lossy and lossless WebP encoding (libwebp, compiled from vendored sources with cc).
 webp = { version = "0.3.1", default-features = false }
+# Its incremental decoder, for pictures shown as they arrive (the same libwebp).
+libwebp-sys = "0.9.6"
+# PNG row by row, for the same (as image uses it).
+png = "0.18.1"

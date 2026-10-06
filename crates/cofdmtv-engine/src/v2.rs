@@ -4,8 +4,10 @@
 //!
 //! On the air: a lead-in of noise symbols, the picture as a multi-frame file (the CRS
 //! header of COFDMTV's multi-frame pictures; any `blocks` of the frames rebuild it, so
-//! extra frames make up for lost ones), then the fancy header at the modem's carrier. The
-//! receiver needs nothing new: modem frames that rebuild into a picture are shown as one.
+//! extra frames make up for lost ones), then the fancy header at the modem's carrier.
+//! The first `blocks` frames are the picture file itself, in order, the extra ones coded
+//! ([`multiframe::split_systematic`]), so the receiver shows the picture from the top as
+//! it arrives. Modem frames that rebuild into a picture are shown as one.
 
 use cofdmtv_core::cofdmtv::{SYMBOL_SECONDS, multiframe};
 use cofdmtv_core::modem::{ModemMode, ModemRequest, transmission_seconds};
@@ -62,10 +64,10 @@ pub fn plan(mode: ModemMode, air_s: f64, noise_symbols: usize, fancy: bool, extr
     }
 }
 
-/// The frames of a v2 picture `file`: its blocks and `extra` more.
+/// The frames of a v2 picture `file`: its blocks, in order, and `extra` more.
 pub fn frames(file: &[u8], mode: ModemMode, extra: usize) -> Result<Vec<Vec<u8>>, String> {
     let blocks = multiframe::blocks_in(file.len(), mode.data_bytes());
-    multiframe::split_chunks(file, blocks + extra, mode.data_bytes())
+    multiframe::split_systematic(file, blocks + extra, mode.data_bytes())
 }
 
 /// The modem transmission of a v2 picture's `frames`.
@@ -112,6 +114,10 @@ mod tests {
         let blocks = multiframe::blocks_in(file.len(), QAM64.data_bytes());
         assert_eq!(frames.len(), blocks + 2);
         assert!(frames.iter().all(|f| f.len() == QAM64.data_bytes()));
+        // The picture first, in order.
+        let first = multiframe::Header::parse(&frames[0]).unwrap();
+        assert_eq!((first.ident, first.blocks), (0, blocks));
+        assert_eq!(&frames[0][multiframe::OVERHEAD..][..100], &file[..100]);
         let req = request(QAM64, "DL1ABC/P", 1500, frames, 8, true);
         assert_eq!((req.noise_symbols, req.fancy_header), (8, true));
     }

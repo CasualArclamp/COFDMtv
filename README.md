@@ -19,7 +19,7 @@ aicodix's own apps and programs:
   up for lost ones;
 - **v2 picture modes** — pictures in modem frames of any modulation and code rate, with
   COFDMTV's lead-in and fancy header and extra frames, compressed to fill the air time you
-  set (COFDMtv to COFDMtv).
+  set, and shown from the top as the frames arrive (COFDMtv to COFDMtv).
 
 ![COFDMtv receiving a recording: the spectrum, the waterfall with the call signs of two transmissions' fancy headers, the QPSK constellation, the picture received, and messages from Rattlegram and the modem](docs/images/receiver.png)
 
@@ -50,8 +50,8 @@ may warn the first time ("More info" → "Run anyway"). On Linux, build from sou
 - **Receiver** — from a sound card or a recording (WAV, FLAC; mono, stereo or I/Q):
   input, sync and decode LEDs, the transmission being received (mode, call sign,
   carrier, SNR, progress), spectrum, waterfall (where the fancy header's call sign
-  reads) and the payload's constellation; received pictures large and in a gallery,
-  messages and pings, and files. Pictures and files are saved as Assempix names them
+  reads) and the payload's constellation; received pictures large and in a gallery (a
+  v2 picture from the top as its frames arrive), messages and pings, and files. Pictures and files are saved as Assempix names them
   (`20261005_213000_DL1ABC.jpg`), messages appended to `messages.txt`. COFDMTV and the
   modem are received at the same time (the modem at 44.1 and 48 kHz).
 - **Transmitter** — a picture (scaled and compressed to fit one frame or several, or in a
@@ -75,6 +75,12 @@ seven frames of which any six rebuild the file.*
 *A v2 picture mode: 30 s of QAM256 1/2 normal frames hold the test card as a WebP at
 quality 96 (left), and the receiver rebuilds it from nine of the ten frames, the call sign
 drawn into the waterfall after them (right).*
+
+![The receiver four frames into the same v2 picture: the top of the test card is in, the rest is dark below an orange line; 231 of 480 rows, 4 of 9 frames](docs/images/v2-arriving.png)
+
+*The same picture arriving: its first frames carry the file itself, in order, so the
+receiver shows it from the top as they come — here four of nine frames in. The extra
+frame, coded, makes up for one lost.*
 
 ![The payload constellation building up for QAM16, QAM64, QAM256 and QAM1024](docs/images/constellations.png)
 

@@ -32,6 +32,33 @@ modes — maybe we will call these v2 modes." Asked how, the user chose:
 - **Extras**: COFDMTV's fancy header, the noise lead-in, and extra frames;
 - **Size**: set by the air time the picture may take.
 
+## Pictures as they arrive (user, 2026-10-06)
+
+"Now can you add progressive decode of the picture?" What can be shown before the end:
+
+- A COFDMTV frame is one polar codeword: nothing of it decodes before its last symbol.
+- Multi-frame files — Shredpix's pictures, modem data — are Cauchy Reed–Solomon coded
+  without the data blocks themselves: every frame mixes all blocks, and nothing of the
+  file is known before `blocks` frames are in. Assempix rejects frames that are data
+  blocks (idents below the blocks), so pictures for Assempix stay as they are.
+- **v2 pictures** (COFDMtv to COFDMtv) now go systematically: the first `blocks` frames
+  are the file itself, in order (idents 0…blocks−1), the extra frames coded as before.
+  Any `blocks` frames still rebuild the file: every square submatrix of a Cauchy matrix
+  is regular, so data blocks and coded ones mix (take the data blocks' shares out of the
+  coded ones and solve for the rest with the closed-form inverse).
+- With each frame the receiver passes on the beginning of the file, as far as it is in
+  without a gap; the GUI decodes it as far as it goes and shows the picture from the top,
+  the rest dark under an orange line, in place of the latest picture (the CLI prints the
+  rows in). A lost frame stops it at the gap until the extra frames complete the picture.
+- Decoding a beginning: WebP through libwebp's incremental decoder (rows from the top
+  once the headers are in — for a lossy WebP that includes the first partition, every
+  macroblock's prediction modes: 10–30 % of the file), JPEG through image's decoder
+  (zune-jpeg decodes a file cut short and fills the rest mid-gray; the MCU row before the
+  gray may be wrong, so it is left out), PNG row by row (Adam7 when complete).
+- Compatibility: COFDMtv after 0.1.4 receives v2 pictures from 0.1.3 and 0.1.4 (coded
+  frames only: shown when complete); 0.1.3 and 0.1.4 do not receive the new ones (they
+  reject the data-block frames, as Assempix does).
+
 ## Choices made while building
 
 - **Pure Rust port** of the C++ (aicodix, BSD Zero Clause License), as DecDRM ported Dream:
@@ -212,17 +239,25 @@ A picture in aicodix modem frames (`cofdmtv_engine::v2`):
 - The air time sets the frames: as many as fit in the time with the lead-in, the header
   and the extra frames (one at least; extra frames only when there are frames to
   spare), and the picture is compressed to fill their blocks.
-- The receiver needs nothing new: modem frames rebuild the file, a picture is shown as
-  one, labelled "v2 QAM64 1/2 normal" and so on.
+- The picture's own blocks go first, in order, the extra frames (coded) after them: the
+  receiver shows the picture from the top as its frames come (see "Pictures as they
+  arrive") and whole once they rebuild it, labelled "v2 QAM64 1/2 normal" and so on.
 - `ModemRequest` has the lead-in (`noise_symbols`) and the header (`fancy_header`);
   `ModemRequest::new` is the original's transmission (one noise symbol, no header), so
   the waveform cross-checks still compare with the original encoder.
 - COFDMtv receives v2 pictures; Assempix does not (it hears no COFDMTV), and the
-  original modem's decoder writes the frames as they come (CRS-coded).
+  original modem's decoder writes the frames as they come (the CRS header, then the
+  picture's blocks or the coded ones).
 - Checked: core round trips (lead-in and header leave the frames decodable, no false
   syncs, timing exact), an engine round trip with the first frame lost, CLI and GUI end
   to end (`tx picture --v2`, the GUI's v2 picture through a file into its receiver), the
   smoke test.
+- Checked, shown as they arrive: the systematic split and rebuilding with frames lost
+  anywhere (data and coded blocks mixed), the beginning growing frame by frame up to a
+  gap; beginnings of WebP (lossy, lossless), JPEG and PNG decoded as far as they go, the
+  same as the whole file there and transparent below; an engine round trip with the third
+  frame lost; the CLI (`rows in`, also in the smoke test) and the GUI receiving a v2
+  recording in real time (screenshots at 13, 17 and 21 s of 29).
 
 ## Milestones
 
@@ -246,3 +281,6 @@ A picture in aicodix modem frames (`cofdmtv_engine::v2`):
       Released as v0.1.3 on 2026-10-06 (34e4f72). v0.1.4 the same day (89b87a1): Linux
       build instructions, `cargo run` starts the app, alsa-lib's probing messages off the
       terminal.
+- [x] M8 — v2 pictures shown as they arrive: systematic v2 frames (the picture first, in
+      order), beginnings of WebP/JPEG/PNG decoded as far as they go, the GUI shows the
+      picture from the top, the CLI the rows in.

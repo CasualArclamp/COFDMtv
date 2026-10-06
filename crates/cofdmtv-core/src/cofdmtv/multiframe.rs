@@ -9,6 +9,11 @@
 //! the reassembly follows Assempix (`MainActivity` `decodePayload`, `crsec.hh`, at most
 //! 12 blocks, 64392 bytes); a modem mode's datagram size for files over the modem (at
 //! most 1024 blocks, as `crs/encode` allows).
+//!
+//! v2 pictures go systematically ([`split_systematic`]): their first frames are the
+//! file's blocks themselves (idents 0…blocks−1, which Assempix and `crs/decode` do not
+//! take), in order, so the receiver has the beginning of the file while the rest arrives
+//! ([`Reassembler::head`]); any `blocks` of the frames still rebuild it.
 
 use super::IMAGE_BYTES;
 use crate::coding::crc::{Crc32, POLY_DATA};
@@ -78,6 +83,18 @@ pub fn split(file: &[u8], frames: usize) -> Result<Vec<Vec<u8>>, String> {
 
 /// Split `file` into `frames` payloads of `chunk` bytes (aicodix/crs `encode.cc`).
 pub fn split_chunks(file: &[u8], frames: usize, chunk: usize) -> Result<Vec<Vec<u8>>, String> {
+    split_frames(file, frames, chunk, false)
+}
+
+/// Split `file` into `frames` payloads of `chunk` bytes as v2 pictures go: the first
+/// [`blocks_in`] frames carry the file's blocks themselves, in order, the rest are coded
+/// as [`split_chunks`] makes them. COFDMtv after 0.1.4 takes the first ones; Assempix,
+/// `crs/decode` and earlier COFDMtv do not.
+pub fn split_systematic(file: &[u8], frames: usize, chunk: usize) -> Result<Vec<Vec<u8>>, String> {
+    split_frames(file, frames, chunk, true)
+}
+
+fn split_frames(file: &[u8], frames: usize, chunk: usize, systematic: bool) -> Result<Vec<Vec<u8>>, String> {
     if chunk <= OVERHEAD + 1 {
         return Err(format!("{chunk}-byte frames are too small"));
     }
@@ -104,8 +121,13 @@ pub fn split_chunks(file: &[u8], frames: usize, chunk: usize) -> Result<Vec<Vec<
     let mut block = vec![0u8; block_bytes];
     let mut out = Vec::with_capacity(frames);
     for i in 0..frames {
-        let ident = (blocks + i) as u16;
-        crs::encode(&data, &mut block, ident, block_bytes);
+        let ident = if systematic { i } else { blocks + i };
+        if ident < blocks {
+            block.copy_from_slice(&data[ident * block_bytes..(ident + 1) * block_bytes]);
+        } else {
+            crs::encode(&data, &mut block, ident as u16, block_bytes);
+        }
+        let ident = ident as u16;
         let mut payload = vec![0u8; chunk];
         payload[..3].copy_from_slice(b"CRS");
         payload[3..5].copy_from_slice(&((blocks - 1) as u16).to_le_bytes());
@@ -138,7 +160,9 @@ pub enum Progress {
     Corrupted,
 }
 
-/// Collects frames of one file at a time (a frame of another file starts afresh).
+/// Collects frames of one file at a time (a frame of another file starts afresh). Takes
+/// the file's own blocks too (idents below the blocks: v2 pictures), which Assempix does
+/// not; Shredpix and `crs/encode` send coded blocks only.
 #[derive(Debug, Clone)]
 pub struct Reassembler {
     /// Payload bytes of a frame, and the most blocks accepted.
@@ -179,7 +203,7 @@ impl Reassembler {
     pub fn push(&mut self, payload: &[u8]) -> Progress {
         let Some(h) = Header::parse(payload) else { return Progress::NotMultiFrame };
         let slot = block_data(self.chunk);
-        if payload.len() < self.chunk || h.blocks > self.max_blocks || usize::from(h.ident) < h.blocks || h.size > slot * h.blocks {
+        if payload.len() < self.chunk || h.blocks > self.max_blocks || h.size > slot * h.blocks {
             return Progress::Unsupported;
         }
         let same = self.current.is_some_and(|c| c.blocks == h.blocks && c.size == h.size && c.crc == h.crc);
@@ -200,8 +224,7 @@ impl Reassembler {
         if self.idents.len() < h.blocks {
             return Progress::Partial { have: self.idents.len(), need: h.blocks };
         }
-        let mut data = vec![0u8; h.blocks * slot];
-        crs::decode(&mut data, &self.slots, &self.idents, slot);
+        let data = self.rebuild(h.blocks, slot);
         let copy = h.size.div_ceil(h.blocks);
         let mut file = Vec::with_capacity(h.size);
         for i in 0..h.blocks {
@@ -217,6 +240,54 @@ impl Reassembler {
             self.idents.clear();
             Progress::Corrupted
         }
+    }
+
+    /// The `blocks` data blocks of the frames in hand (as many): those that came as they
+    /// are, and the rest solved for from the coded ones, less the shares of those in hand.
+    fn rebuild(&self, blocks: usize, slot: usize) -> Vec<u8> {
+        let mut data = vec![0u8; blocks * slot];
+        let mut missing = Vec::new();
+        for j in 0..blocks {
+            match self.idents.iter().position(|&id| usize::from(id) == j) {
+                Some(k) => data[j * slot..(j + 1) * slot].copy_from_slice(&self.slots[k * slot..(k + 1) * slot]),
+                None => missing.push(j as u16),
+            }
+        }
+        if missing.is_empty() {
+            return data;
+        }
+        let (mut coded, mut idents) = (Vec::with_capacity(missing.len() * slot), Vec::with_capacity(missing.len()));
+        for (k, &id) in self.idents.iter().enumerate().filter(|&(_, &id)| usize::from(id) >= blocks) {
+            let mut block = self.slots[k * slot..(k + 1) * slot].to_vec();
+            for j in (0..blocks).filter(|&j| !missing.contains(&(j as u16))) {
+                crs::accumulate(&mut block, &data[j * slot..(j + 1) * slot], id, j as u16);
+            }
+            coded.extend_from_slice(&block);
+            idents.push(id);
+        }
+        let mut solved = vec![0u8; missing.len() * slot];
+        crs::decode_columns(&mut solved, &coded, &idents, &missing, slot);
+        for (i, &j) in missing.iter().enumerate() {
+            let j = usize::from(j);
+            data[j * slot..(j + 1) * slot].copy_from_slice(&solved[i * slot..(i + 1) * slot]);
+        }
+        data
+    }
+
+    /// The beginning of the file being collected, as far as its own blocks are in hand
+    /// from the first on (v2 pictures: their first frames are the file, in order); empty
+    /// without the first.
+    pub fn head(&self) -> Vec<u8> {
+        let Some(h) = self.current else { return Vec::new() };
+        let slot = block_data(self.chunk);
+        let copy = h.size.div_ceil(h.blocks);
+        let mut head = Vec::new();
+        for j in 0..h.blocks {
+            let Some(k) = self.idents.iter().position(|&id| usize::from(id) == j) else { break };
+            let n = copy.min(h.size - head.len());
+            head.extend_from_slice(&self.slots[k * slot..k * slot + n]);
+        }
+        head
     }
 }
 
@@ -257,6 +328,49 @@ mod tests {
         assert!(split(&vec![0; MAX_BYTES + 1], 13).is_err());
         assert!(split(&[1, 2, 3], 0).is_err());
         assert_eq!(r.push(&[0u8; IMAGE_BYTES]), Progress::NotMultiFrame);
+    }
+
+    #[test]
+    fn systematic_frames_give_the_beginning_as_they_come() {
+        let mut rng = Xorshift32::default();
+        let file: Vec<u8> = (0..2000).map(|_| rng.next() as u8).collect();
+        let blocks = blocks_in(file.len(), 171);
+        let frames = split_systematic(&file, blocks + 3, 171).unwrap();
+        // The first frames are the file itself.
+        let copy = file.len().div_ceil(blocks);
+        assert_eq!(Header::parse(&frames[2]).unwrap().ident, 2);
+        assert_eq!(&frames[2][OVERHEAD..OVERHEAD + copy], &file[2 * copy..3 * copy]);
+        // In order: the beginning grows frame by frame.
+        let mut r = Reassembler::new(171, MAX_BLOCKS_ANY);
+        for (i, f) in frames[..blocks - 1].iter().enumerate() {
+            assert_eq!(r.push(f), Progress::Partial { have: i + 1, need: blocks });
+            assert_eq!(r.head(), file[..(i + 1) * copy]);
+        }
+        assert_eq!(r.push(&frames[blocks - 1]), Progress::Complete(file.clone()));
+        // Frames lost: the beginning stops at the first gap, coded frames make up for them.
+        for lost in [vec![0], vec![3], vec![1, 4, 12]] {
+            let mut r = Reassembler::new(171, MAX_BLOCKS_ANY);
+            let mut rebuilt = None;
+            for (i, f) in frames.iter().enumerate().filter(|(i, _)| !lost.contains(i)) {
+                match r.push(f) {
+                    Progress::Complete(got) => rebuilt = Some(got),
+                    Progress::Partial { .. } | Progress::Redundant => {}
+                    other => panic!("{lost:?}, frame {i}: {other:?}"),
+                }
+                if i < blocks {
+                    assert_eq!(r.head().len(), lost[0].min(i + 1) * copy, "{lost:?}, frame {i}");
+                }
+            }
+            assert!(rebuilt.as_ref() == Some(&file), "{lost:?}");
+        }
+        // Coded frames alone, as before.
+        let mut r = Reassembler::new(171, MAX_BLOCKS_ANY);
+        let mut last = Progress::NotMultiFrame;
+        for f in &split_chunks(&file, blocks + 1, 171).unwrap()[1..] {
+            last = r.push(f);
+            assert!(r.head().is_empty());
+        }
+        assert_eq!(last, Progress::Complete(file));
     }
 
     #[test]

@@ -4,13 +4,17 @@
 //! choices; each side 16…1024 pixels, which Assempix requires) and compressed — JPEG,
 //! PNG, or WebP lossy/lossless — with the highest quality that fits the byte budget: one
 //! payload (5380 bytes), or the blocks of a multi-frame transmission. A file that already
-//! fits is sent unchanged.
+//! fits is sent unchanged. A picture still arriving is decoded as far as it has come
+//! ([`decode_partial`]).
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{DynamicImage, ImageEncoder, ImageReader, RgbImage, RgbaImage};
 use std::io::Cursor;
 use std::path::Path;
+
+mod partial;
+pub use partial::{Partial, decode_partial};
 
 /// Smallest and largest side Assempix accepts.
 pub const MIN_SIDE: u32 = 16;

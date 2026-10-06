@@ -353,7 +353,11 @@ fn rx(a: RxArgs) -> Result<()> {
                 ),
                 RxEvent::Text(m) => println!("{} {:<9} text, {}: {}", m.time.format("%H:%M:%S"), m.call, m.label, m.text),
                 RxEvent::Ping { call, cfo_hz } => println!("{:<9} ping at {cfo_hz:.0} Hz", call),
-                RxEvent::MultiFrame { call, have, need, size } => println!("{call:<9} frame {have} of {need} ({size} bytes)"),
+                RxEvent::MultiFrame { call, have, need, size, head, .. } => {
+                    // A picture arriving in order (v2): how much of it is in.
+                    let rows = cofdmtv_pix::decode_partial(&head).map_or(String::new(), |p| format!(", {} of {} rows in", p.rows, p.image.height()));
+                    println!("{call:<9} frame {have} of {need} ({size} bytes{rows})");
+                }
                 RxEvent::DecodeFailed { label, call, snr_db } => println!("{call:<9} {label}: decoding failed (SNR {snr_db:.1} dB)"),
                 RxEvent::Error(e) => error = Some(e),
                 RxEvent::Stopped => break 'run,

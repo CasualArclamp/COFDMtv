@@ -580,6 +580,8 @@ name = "cofdmtv-pix"
 version = "0.1.4"
 dependencies = [
  "image",
+ "libwebp-sys",
+ "png",
  "webp",
 ]
 

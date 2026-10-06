@@ -6,6 +6,11 @@
 //! data. Coded block `x` is Σ_j d_j / (x + j) (Cauchy matrix; `+` is XOR in the field);
 //! decoding multiplies with the inverse of the Cauchy submatrix of the received idents,
 //! which has a closed form. Symbols are 16-bit little-endian words of the blocks' bytes.
+//!
+//! The data blocks themselves can go along as blocks `0…count−1` (a systematic code):
+//! every square submatrix of a Cauchy matrix is regular, so any `count` blocks, data or
+//! coded, still give back the data. Take the shares of the data blocks in hand out of the
+//! coded ones ([`accumulate`]) and solve for the rest ([`decode_columns`]).
 
 use std::sync::OnceLock;
 
@@ -105,24 +110,40 @@ pub fn encode(data: &[u8], block: &mut [u8], ident: u16, block_bytes: usize) {
 /// Recover all data blocks from `count` coded blocks: `blocks` holds them one after the
 /// other (`block_bytes` each), `idents` their identifiers. Writes `count` blocks to `data`.
 pub fn decode(data: &mut [u8], blocks: &[u8], idents: &[u16], block_bytes: usize) {
+    let columns: Vec<u16> = (0..idents.len() as u16).collect();
+    decode_columns(data, blocks, idents, &columns, block_bytes);
+}
+
+/// Add data block `column`'s share to coded block `ident`: `block += data / (ident +
+/// column)`. Adding is subtracting, so this also takes a data block in hand out of a
+/// coded one.
+pub fn accumulate(block: &mut [u8], data: &[u8], ident: u16, column: u16) {
+    assert!(ident != column && block.len() == data.len() && block.len().is_multiple_of(2));
+    multiply_accumulate(block, data, cauchy(ident, column), false);
+}
+
+/// Recover the data blocks `columns` from as many coded blocks that hold only their shares
+/// (the other data blocks' taken out, see [`accumulate`]): `blocks` one after the other,
+/// `idents` their identifiers. Writes the blocks of `columns`, in that order, to `data`.
+pub fn decode_columns(data: &mut [u8], blocks: &[u8], idents: &[u16], columns: &[u16], block_bytes: usize) {
     let n = idents.len();
-    assert!(blocks.len() == n * block_bytes && data.len() == n * block_bytes && block_bytes % 2 == 0);
+    assert!(columns.len() == n && blocks.len() == n * block_bytes && data.len() == n * block_bytes && block_bytes.is_multiple_of(2));
     for i in 0..n {
-        // The row of the inverse Cauchy matrix for data block i (closed form, as in the
-        // original's `inverse_cauchy_matrix`).
-        let col_i = i as u16;
+        // The row of the inverse Cauchy matrix for data block `columns[i]` (closed form, as
+        // in the original's `inverse_cauchy_matrix`, there with columns 0…n−1).
+        let col_i = columns[i];
         let (mut row_num, mut row_den) = (Index::ONE, Index::ONE);
         for k in 0..n {
             row_num = row_num.mul(Index::of(idents[k] ^ col_i));
             if k != i {
-                row_den = row_den.mul(Index::of(col_i ^ k as u16));
+                row_den = row_den.mul(Index::of(col_i ^ columns[k]));
             }
         }
         let out = &mut data[i * block_bytes..(i + 1) * block_bytes];
         for j in 0..n {
             let (mut num, mut den) = (row_num, row_den);
             for k in 0..n {
-                num = num.mul(Index::of(idents[j] ^ k as u16));
+                num = num.mul(Index::of(idents[j] ^ columns[k]));
                 if k != j {
                     den = den.mul(Index::of(idents[j] ^ idents[k]));
                 }
@@ -158,6 +179,39 @@ mod tests {
             let mut out = vec![0u8; count * bytes];
             decode(&mut out, &blocks, &ids, bytes);
             assert_eq!(out, data, "{pick:?}");
+        }
+    }
+
+    #[test]
+    fn data_and_coded_blocks_mixed_recover_the_data() {
+        let (count, bytes) = (5usize, 32usize);
+        let mut rng = Xorshift32::default();
+        let data: Vec<u8> = (0..count * bytes).map(|_| rng.next() as u8).collect();
+        let block = |id: u16| -> Vec<u8> {
+            if usize::from(id) < count {
+                data[usize::from(id) * bytes..][..bytes].to_vec()
+            } else {
+                let mut b = vec![0u8; bytes];
+                encode(&data, &mut b, id, bytes);
+                b
+            }
+        };
+        // Data blocks in hand, coded ones making up for the rest.
+        for (have, coded) in [(vec![0, 1, 2, 3], vec![5]), (vec![1, 3], vec![9, 6, 5]), (vec![4], vec![5, 6, 7, 8]), (vec![], vec![5, 6, 7, 8, 9])] {
+            let missing: Vec<u16> = (0..count as u16).filter(|j| !have.contains(j)).collect();
+            let mut rows = Vec::new();
+            for &id in &coded {
+                let mut b = block(id);
+                for &j in &have {
+                    accumulate(&mut b, &block(j), id, j);
+                }
+                rows.extend(b);
+            }
+            let mut out = vec![0u8; missing.len() * bytes];
+            decode_columns(&mut out, &rows, &coded, &missing, bytes);
+            for (i, &j) in missing.iter().enumerate() {
+                assert_eq!(out[i * bytes..][..bytes], block(j)[..], "{have:?} {coded:?}: block {j}");
+            }
         }
     }
 }

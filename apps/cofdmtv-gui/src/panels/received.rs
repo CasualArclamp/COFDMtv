@@ -1,11 +1,12 @@
-//! The side panel: the latest (or chosen) picture large with what is known about it, a
-//! multi-frame picture or file in the making, and the gallery of pictures, the list of
-//! messages and pings, or the list of files (modem datagrams).
+//! The side panel: the latest (or chosen) picture large with what is known about it — or
+//! a picture still arriving, as far as it has come — a multi-frame picture or file in the
+//! making, and the gallery of pictures, the list of messages and pings, or the list of
+//! files (modem datagrams).
 
 use super::{Palette, heading, placeholder};
-use crate::receiver::{Message, RxSession};
+use crate::receiver::{Arriving, Message, MultiFrame, RxSession};
 use crate::settings::SideTab;
-use eframe::egui::{self, RichText, Sense, Ui, vec2};
+use eframe::egui::{self, RichText, Sense, Stroke, Ui, vec2};
 use std::path::Path;
 
 pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
@@ -14,12 +15,15 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
     ui.add_space(2.0);
     let ctx = ui.ctx().clone();
     let shown = rx.selected.filter(|&i| i < rx.pictures.len()).or(rx.pictures.len().checked_sub(1));
-    match shown {
-        None => {
+    let max_h = (ui.available_height() * 0.5).max(160.0);
+    // A picture arriving in order takes the place of the latest one while it comes.
+    let arriving = if rx.selected.is_none() { rx.arriving.as_mut() } else { None };
+    match (arriving, shown) {
+        (Some(a), _) => arriving_picture(ui, a, rx.multiframe.as_ref(), &ctx, &pal, max_h),
+        (None, None) => {
             placeholder(ui, "No picture received yet. Pictures from Shredpix (or COFDMtv) appear here, and are saved if \"Save to\" is on.");
         }
-        Some(i) => {
-            let max_h = (ui.available_height() * 0.5).max(160.0);
+        (None, Some(i)) => {
             let width = ui.available_width();
             let pic = &mut rx.pictures[i];
             match pic.texture(&ctx, i) {
@@ -68,7 +72,8 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
         ui.add_space(4.0);
         egui::Frame::group(ui.style()).corner_radius(egui::CornerRadius::same(4)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("Multi-frame file from {}", m.call)).strong());
+            let what = if rx.arriving.is_some() { "Picture" } else { "Multi-frame file" };
+            ui.label(RichText::new(format!("{what} from {}", m.call)).strong()).on_hover_text(&m.label);
             ui.add(
                 egui::ProgressBar::new(m.have as f32 / m.need.max(1) as f32)
                     .desired_width(ui.available_width())
@@ -89,6 +94,40 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession, tab: &mut SideTab) {
         SideTab::Messages => messages(ui, rx, &pal),
         SideTab::Files => files(ui, rx),
     }
+}
+
+/// A picture arriving in order, as far as it has come: the rest of it dark, a line at the
+/// edge of what is in, as on an SSTV screen.
+fn arriving_picture(ui: &mut Ui, a: &mut Arriving, m: Option<&MultiFrame>, ctx: &egui::Context, pal: &Palette, max_h: f32) {
+    let width = ui.available_width();
+    let mut facts = vec![a.kind.map_or("picture", |k| k.name()).to_string()];
+    match a.texture(ctx) {
+        Some((tex, rows)) => {
+            let size = tex.size_vec2();
+            let scale = (width / size.x).min(max_h / size.y).min(4.0);
+            ui.vertical_centered(|ui| {
+                let (rect, _) = ui.allocate_exact_size(size * scale, Sense::hover());
+                ui.painter().rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+                egui::Image::new(tex).corner_radius(3.0).paint_at(ui, rect);
+                if (rows as f32) < size.y {
+                    let y = rect.top() + rows as f32 * scale;
+                    ui.painter().hline(rect.x_range(), y, Stroke::new(1.5, pal.marker));
+                }
+            });
+            facts.push(format!("{}×{}", size.x, size.y));
+            facts.push(format!("{} of {} rows", rows, size.y));
+        }
+        None => placeholder(ui, "A picture is arriving; it shows once its header is in."),
+    }
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(&a.call).strong().size(15.0));
+        ui.label(RichText::new("arriving").weak().italics());
+    });
+    if let Some(m) = m {
+        facts.push(m.label.clone());
+    }
+    ui.label(RichText::new(facts.join(" · ")).weak());
 }
 
 /// Open and Folder buttons and the name of a saved file.
@@ -112,7 +151,8 @@ fn gallery(ui: &mut Ui, rx: &mut RxSession, ctx: &egui::Context) {
         return;
     }
     let thumb = 84.0;
-    let shown = rx.selected.or(rx.pictures.len().checked_sub(1));
+    // None marked while a picture arriving is shown instead of the latest.
+    let shown = if rx.selected.is_none() && rx.arriving.is_some() { None } else { rx.selected.or(rx.pictures.len().checked_sub(1)) };
     let mut clicked = None;
     egui::ScrollArea::vertical().id_salt("gallery").auto_shrink([false, false]).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {

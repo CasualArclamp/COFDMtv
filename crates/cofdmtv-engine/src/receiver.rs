@@ -67,8 +67,11 @@ pub enum RxEvent {
     Text(TextMessage),
     /// A modem datagram or a file rebuilt from frames (not a picture).
     File(ReceivedFile),
-    /// A frame of a multi-frame picture or file arrived.
-    MultiFrame { call: String, have: usize, need: usize, size: usize },
+    /// A frame of a multi-frame picture or file arrived: `have` of the `need` frames that
+    /// rebuild the `size`-byte file are in hand. `head` is the beginning of a picture as far
+    /// as it has arrived in order (a v2 picture's first frames carry the file itself), for
+    /// showing it as it comes; empty for others. `label`: how it comes.
+    MultiFrame { call: String, label: String, have: usize, need: usize, size: usize, head: Vec<u8> },
     /// The recording ended.
     EndOfInput,
     /// Something went wrong; the receiver stops.
@@ -685,8 +688,20 @@ fn multi(events: &Sender<RxEvent>, save_dir: &Option<PathBuf>, a: &Arrived, prog
     match progress {
         Progress::Partial { have, need } => {
             let size = frames.state().map_or(0, |(h, _)| h.size);
-            log(format!("{:>9}  frame {have} of {need} of a {size}-byte file", a.call));
-            let _ = events.send(RxEvent::MultiFrame { call: a.call.clone(), have, need, size });
+            let mut head = frames.head();
+            let kind = payload::ImageKind::sniff(&head);
+            let label = match kind {
+                Some(k) => {
+                    log(format!("{:>9}  frame {have} of {need} of a {size}-byte {}, its first {} bytes in hand", a.call, k.name(), head.len()));
+                    a.picture_label.clone().unwrap_or_else(|| a.label.clone())
+                }
+                None => {
+                    log(format!("{:>9}  frame {have} of {need} of a {size}-byte file", a.call));
+                    head.clear();
+                    a.label.clone()
+                }
+            };
+            let _ = events.send(RxEvent::MultiFrame { call: a.call.clone(), label, have, need, size, head });
         }
         Progress::Complete(file) => {
             let n = frames.state().map_or(1, |(h, _)| h.blocks);

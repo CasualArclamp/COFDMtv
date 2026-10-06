@@ -4,11 +4,12 @@
 //! of its latest snapshot each frame, plus the events (transmissions, pictures, texts,
 //! log lines) and waterfall rows that arrived since (see `cofdmtv_engine::receiver`). What
 //! the displays derive from them — the waterfall history, the received pictures with
-//! their textures, the message and file lists, the indicator states — lives here.
+//! their textures, a picture still arriving, the message and file lists, the indicator
+//! states — lives here.
 
 use crate::waterfall::{Waterfall, crop};
 use chrono::{DateTime, Local};
-use cofdmtv_engine::payload::{Picture, ReceivedFile, TextMessage};
+use cofdmtv_engine::payload::{ImageKind, Picture, ReceivedFile, TextMessage};
 use cofdmtv_engine::{Receiver, RxConfig, RxEvent, RxSnapshot};
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use std::collections::VecDeque;
@@ -97,9 +98,55 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub struct MultiFrame {
     pub call: String,
+    /// How it comes ("v2 QAM256 1/2 normal", "modem QPSK 1/2 short", "mode 12 …").
+    pub label: String,
     pub have: usize,
     pub need: usize,
     pub size: usize,
+}
+
+/// A picture arriving in order (a v2 picture's first frames carry the file itself), shown
+/// as far as it has come.
+pub struct Arriving {
+    pub call: String,
+    pub kind: Option<ImageKind>,
+    /// The file's first bytes in hand.
+    head: Vec<u8>,
+    /// `head` came after the texture was made.
+    stale: bool,
+    /// The picture so far (transparent where it has not arrived) and the rows decoded.
+    shown: Option<(TextureHandle, u32)>,
+}
+
+impl Arriving {
+    fn new(call: String, head: Vec<u8>) -> Self {
+        Self { call, kind: ImageKind::sniff(&head), head, stale: true, shown: None }
+    }
+
+    /// More of the same picture: the texture stays until the new bytes are decoded.
+    fn update(&mut self, head: Vec<u8>) {
+        self.head = head;
+        self.stale = true;
+    }
+
+    /// The picture so far and the rows decoded, decoding what came since the last call;
+    /// `None` until its header is in.
+    pub fn texture(&mut self, ctx: &egui::Context) -> Option<(&TextureHandle, u32)> {
+        if std::mem::take(&mut self.stale)
+            && let Some(p) = cofdmtv_pix::decode_partial(&self.head)
+        {
+            let size = [p.image.width() as usize, p.image.height() as usize];
+            let image = ColorImage::from_rgba_unmultiplied(size, p.image.as_raw());
+            match &mut self.shown {
+                Some((tex, rows)) if tex.size() == size => {
+                    tex.set(image, TextureOptions::LINEAR);
+                    *rows = p.rows;
+                }
+                _ => self.shown = Some((ctx.load_texture("arriving", image, TextureOptions::LINEAR), p.rows)),
+            }
+        }
+        self.shown.as_ref().map(|(t, rows)| (t, *rows))
+    }
 }
 
 /// How the last transmission ended, for the indicators.
@@ -127,6 +174,8 @@ pub struct RxSession {
     /// Modem datagrams and files that are neither text nor pictures, newest last.
     pub files: Vec<ReceivedFile>,
     pub multiframe: Option<MultiFrame>,
+    /// A picture of that, arriving in order.
+    pub arriving: Option<Arriving>,
     /// The band of the transmission being received or last received (carrier and
     /// bandwidth, Hz), and when it ended.
     pub band: Option<(f32, f32)>,
@@ -158,6 +207,7 @@ impl RxSession {
         self.snap = RxSnapshot::default();
         self.waterfall.clear();
         self.multiframe = None;
+        self.arriving = None;
         self.band = None;
         self.outcome = None;
         self.preamble_failed = None;
@@ -226,6 +276,7 @@ impl RxSession {
                 self.note(&p.call);
                 if p.frames > 1 {
                     self.multiframe = None;
+                    self.arriving = None;
                 }
                 self.pictures.push(ShownPicture::new(p));
                 if self.pictures.len() > PICTURES_KEPT {
@@ -247,6 +298,7 @@ impl RxSession {
                 self.note(&f.call);
                 if f.frames > 1 {
                     self.multiframe = None;
+                    self.arriving = None;
                 }
                 self.files.push(f);
                 if self.files.len() > PICTURES_KEPT {
@@ -254,9 +306,19 @@ impl RxSession {
                 }
                 self.fresh = true;
             }
-            RxEvent::MultiFrame { call, have, need, size } => {
+            RxEvent::MultiFrame { call, label, have, need, size, head } => {
                 self.outcome = Some((Outcome::Decoded, Instant::now()));
-                self.multiframe = Some(MultiFrame { call, have, need, size });
+                // The same file goes on (frames in hand count up, its head grows or stays).
+                let same = self.multiframe.as_ref().is_some_and(|m| m.call == call && m.size == size && m.need == need && m.have < have);
+                self.arriving = match self.arriving.take() {
+                    _ if head.is_empty() => None,
+                    Some(mut a) if same => {
+                        a.update(head);
+                        Some(a)
+                    }
+                    _ => Some(Arriving::new(call.clone(), head)),
+                };
+                self.multiframe = Some(MultiFrame { call, label, have, need, size });
             }
             RxEvent::EndOfInput => {}
             RxEvent::Error(e) => self.log.push(format!("error: {e}")),
