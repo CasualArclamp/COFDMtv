@@ -100,6 +100,8 @@ modes — maybe we will call these v2 modes." Asked how, the user chose:
   30 ppm SFO, optional multipath, AWGN) decoded by both. COFDMtv decodes at least as well
   everywhere; near threshold about 0.3–0.5 dB better (larger list).
 - `tests/fixtures`: signals from the originals, decoded in CI (`tests/compat.rs`).
+- Linux beyond CI's headless Ubuntu: built from source with the README's steps and working
+  on Arch Linux (zen kernel 7.2, PipeWire 1.6.9) on a user's machine, 2026-10-06.
 
 ## Layout
 
