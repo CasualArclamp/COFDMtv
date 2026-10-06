@@ -22,6 +22,7 @@ use cofdmtv_core::coding::qam::Qam;
 use cofdmtv_core::cofdmtv::multiframe::{self, Progress, Reassembler};
 use cofdmtv_core::cofdmtv::{Codeword, Decoder, Event, Mode, PolarDecoders, decode_codeword};
 use cofdmtv_core::modem::{self, ModemCodeword, ModemDecoder, ModemEvent, Modulation, decode_datagram};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver as Rx, Sender, SyncSender, TryRecvError};
@@ -106,11 +107,14 @@ pub struct RxSnapshot {
     pub receiving: Option<Receiving>,
     /// A payload is being decoded.
     pub decoding: bool,
-    /// The last payload symbol's points, the ideal points of its modulation (none for the
-    /// large QAMs) and its name.
-    pub constellation: Vec<[f32; 2]>,
+    /// The payload points of the last symbols, oldest first — about a dozen for every
+    /// point of the modulation (see [`PointHistory`]) — the ideal points of the
+    /// modulation (none for the large QAMs), its name, and how many symbols the points
+    /// span. Shared, so a snapshot copies the pointer.
+    pub constellation: Arc<Vec<[f32; 2]>>,
     pub ideal: Vec<[f32; 2]>,
     pub constellation_label: String,
+    pub constellation_symbols: usize,
     /// Signal-to-noise ratio of the last payload symbol, dB.
     pub snr_db: Option<f32>,
     /// The modem decoder runs (the input is at 44.1 or 48 kHz).
@@ -261,7 +265,10 @@ fn run(cfg: &RxConfig, commands: &Rx<()>, events: &Sender<RxEvent>, rows: &SyncS
     let channels = source.channels();
     let mut level = LevelMeter::new(rate);
     let mut ended = false;
-    // Which decoder showed the last constellation.
+    // Every payload symbol's points go into the constellation's history, from whichever
+    // decoder demodulated it; its SNR is the one shown.
+    let mut history = PointHistory::default();
+    let (mut cofdmtv_seq, mut modem_seq) = (dec.points_seq(), modem.as_ref().map_or(0, ModemDecoder::points_seq));
     let mut last_points = SignalKind::Cofdmtv;
     loop {
         match commands.try_recv() {
@@ -293,19 +300,31 @@ fn run(cfg: &RxConfig, commands: &Rx<()>, events: &Sender<RxEvent>, rows: &SyncS
             level.push(if iq { z.norm() } else { z.re });
             spectrum.push(z);
             let ready = if iq { dec.push(z) } else { dec.push_real(z.re) };
-            if ready && let Some(ev) = dec.process() {
-                if matches!(ev, Event::Sync { .. }) {
+            if ready {
+                if let Some(ev) = dec.process() {
+                    found.push(ev);
+                }
+                if dec.points_seq() != cofdmtv_seq {
+                    cofdmtv_seq = dec.points_seq();
+                    let (points, psk) = dec.constellation();
+                    let ideal = || psk.points().into_iter().map(|c| [c.re, c.im]).collect();
+                    // Erased carriers (no reference) are 0: not points.
+                    let shown = points.iter().filter(|c| c.re != 0.0 || c.im != 0.0).map(|c| [c.re, c.im]);
+                    history.push(psk_name(psk), psk.points().len(), ideal, shown);
                     last_points = SignalKind::Cofdmtv;
                 }
-                found.push(ev);
             }
             if let Some(m) = &mut modem {
                 let ev = if iq { m.push(z) } else { m.push_real(z.re) };
                 if let Some(ev) = ev {
-                    if matches!(ev, ModemEvent::Sync { .. }) {
+                    modem_found.push(ev);
+                }
+                if m.points_seq() != modem_seq {
+                    modem_seq = m.points_seq();
+                    if let Some(md) = m.last_modulation() {
+                        history.push(md.name(), 1 << md.bits(), || ideal_points(md), m.points.iter().map(|c| [c.re, c.im]));
                         last_points = SignalKind::Modem;
                     }
-                    modem_found.push(ev);
                 }
             }
         }
@@ -344,24 +363,9 @@ fn run(cfg: &RxConfig, commands: &Rx<()>, events: &Sender<RxEvent>, rows: &SyncS
                         symbols,
                     })
                 });
-            let (constellation, ideal, constellation_label, snr_db) = match (last_points, &modem) {
-                (SignalKind::Modem, Some(m)) => {
-                    let modulation = m.last_modulation();
-                    let label = modulation.map_or("modem".to_string(), |md| md.name().to_string());
-                    let ideal = modulation.map(ideal_points).unwrap_or_default();
-                    (m.points.iter().map(|c| [c.re, c.im]).collect(), ideal, label, m.last_snr_db())
-                }
-                _ => {
-                    let (points, psk) = dec.constellation();
-                    let label = match psk {
-                        Psk::Bpsk => "BPSK",
-                        Psk::Qpsk => "QPSK",
-                        Psk::Psk8 => "8PSK",
-                    };
-                    let ideal = if points.is_empty() { Vec::new() } else { psk.points().into_iter().map(|c| [c.re, c.im]).collect() };
-                    let shown = points.iter().filter(|c| c.re != 0.0 || c.im != 0.0).map(|c| [c.re, c.im]).collect();
-                    (shown, ideal, label.to_string(), dec.last_snr_db())
-                }
+            let snr_db = match (last_points, &modem) {
+                (SignalKind::Modem, Some(m)) => m.last_snr_db(),
+                _ => dec.last_snr_db(),
             };
             let snap = RxSnapshot {
                 source: info.clone(),
@@ -373,9 +377,10 @@ fn run(cfg: &RxConfig, commands: &Rx<()>, events: &Sender<RxEvent>, rows: &SyncS
                 row_s: spectrum.row_seconds(),
                 receiving,
                 decoding: decoding.load(Ordering::Relaxed),
-                constellation,
-                ideal,
-                constellation_label,
+                constellation: history.points(),
+                ideal: history.ideal.clone(),
+                constellation_label: history.label.clone(),
+                constellation_symbols: history.symbols(),
                 snr_db,
                 modem: modem.is_some(),
                 running: true,
@@ -397,6 +402,84 @@ fn run(cfg: &RxConfig, commands: &Rx<()>, events: &Sender<RxEvent>, rows: &SyncS
         if info.is_file {
             g.1.position_s = source.position_s();
         }
+        // A recording read faster than real time ends between two snapshots: the last
+        // symbols are not in the last one.
+        g.1.constellation = history.points();
+        g.1.ideal = history.ideal.clone();
+        g.1.constellation_label = history.label.clone();
+        g.1.constellation_symbols = history.symbols();
+        g.1.snr_db = match (last_points, &modem) {
+            (SignalKind::Modem, Some(m)) => m.last_snr_db(),
+            _ => dec.last_snr_db(),
+        };
+    }
+}
+
+/// Points the constellation display keeps per point of the modulation.
+const POINTS_PER_STATE: usize = 12;
+/// Points it keeps at least.
+const MIN_POINTS: usize = 512;
+
+/// The constellation display's points: the last symbols', newest last, as BinModem's
+/// symbol scope keeps them — a dozen for every point of the modulation, at least 512, so
+/// that a large constellation shows clusters rather than a speckled square (one QAM4096
+/// symbol lands 256 points on 4096 places; this keeps the last 192 symbols). A new
+/// modulation starts afresh.
+#[derive(Default)]
+struct PointHistory {
+    label: String,
+    ideal: Vec<[f32; 2]>,
+    depth: usize,
+    points: VecDeque<[f32; 2]>,
+    /// Points of the last symbol (to count the symbols kept).
+    per_symbol: usize,
+    /// What the snapshots share, made again when points came in since.
+    shared: Arc<Vec<[f32; 2]>>,
+    changed: bool,
+}
+
+impl PointHistory {
+    /// Points kept for a modulation of `states` points.
+    fn depth(states: usize) -> usize {
+        (POINTS_PER_STATE * states).max(MIN_POINTS)
+    }
+
+    /// Add a symbol's `points` in a modulation `label` of `states` points.
+    fn push(&mut self, label: &str, states: usize, ideal: impl FnOnce() -> Vec<[f32; 2]>, points: impl Iterator<Item = [f32; 2]>) {
+        if self.label != label {
+            self.label = label.to_string();
+            self.depth = Self::depth(states);
+            self.ideal = if states <= 64 { ideal() } else { Vec::new() };
+            self.points.clear();
+        }
+        let before = self.points.len();
+        self.points.extend(points);
+        self.per_symbol = self.points.len() - before;
+        let excess = self.points.len().saturating_sub(self.depth);
+        self.points.drain(..excess);
+        self.changed = true;
+    }
+
+    /// Symbols the points span.
+    fn symbols(&self) -> usize {
+        self.points.len().div_ceil(self.per_symbol.max(1))
+    }
+
+    /// The points for a snapshot.
+    fn points(&mut self) -> Arc<Vec<[f32; 2]>> {
+        if self.changed {
+            self.shared = Arc::new(self.points.iter().copied().collect());
+            self.changed = false;
+        }
+        Arc::clone(&self.shared)
+    }
+}
+
+fn psk_name(psk: Psk) -> &'static str {
+    match psk {
+        Psk::Bpsk => "BPSK",
+        Psk::Qpsk => "QPSK",
+        Psk::Psk8 => "8PSK",
     }
 }
 
@@ -693,5 +776,39 @@ impl LevelMeter {
 
     fn value(&self) -> Option<(f32, f32)> {
         self.value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn symbol(n: usize, at: f32) -> impl Iterator<Item = [f32; 2]> {
+        (0..n).map(move |i| [at, i as f32])
+    }
+
+    #[test]
+    fn a_dozen_per_point_and_512_at_least() {
+        assert_eq!(PointHistory::depth(8), 512);
+        assert_eq!(PointHistory::depth(64), 768);
+        assert_eq!(PointHistory::depth(4096), 49_152);
+    }
+
+    #[test]
+    fn the_last_symbols_are_kept_and_a_new_modulation_starts_afresh() {
+        let mut h = PointHistory::default();
+        h.push("QAM4096", 4096, Vec::new, symbol(256, 1.0));
+        let first = h.points();
+        assert_eq!((first.len(), h.symbols()), (256, 1));
+        assert!(Arc::ptr_eq(&first, &h.points()), "no new points, no new copy");
+        for _ in 0..199 {
+            h.push("QAM4096", 4096, Vec::new, symbol(256, 2.0));
+        }
+        let kept = h.points();
+        assert_eq!((kept.len(), h.symbols()), (49_152, 192));
+        assert!(kept.iter().all(|p| p[0] == 2.0), "the oldest symbols went first");
+        assert!(h.ideal.is_empty());
+        h.push("QPSK", 4, || vec![[0.7, 0.7]; 4], symbol(128, 3.0));
+        assert_eq!((h.points().len(), h.symbols(), h.ideal.len()), (128, 1, 4));
     }
 }

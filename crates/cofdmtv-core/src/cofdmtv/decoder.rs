@@ -137,6 +137,8 @@ pub struct Decoder {
     phase: Vec<f32>,
     code: Vec<f32>,
     snr: Vec<f32>,
+    /// Payload symbols demodulated so far (see [`Self::points_seq`]).
+    points_seq: u64,
     codeword: Option<Codeword>,
 }
 
@@ -178,6 +180,7 @@ impl Decoder {
             phase: Vec::new(),
             code: Vec::new(),
             snr: Vec::new(),
+            points_seq: 0,
             codeword: None,
         })
     }
@@ -272,6 +275,13 @@ impl Decoder {
         (&self.cons, self.psk)
     }
 
+    /// Counts the payload symbols demodulated, each of which replaces
+    /// [`Self::constellation`]: a display collecting the points takes them when this
+    /// changes.
+    pub fn points_seq(&self) -> u64 {
+        self.points_seq
+    }
+
     /// Signal-to-noise ratio of the last payload symbol, dB.
     pub fn last_snr_db(&self) -> Option<f32> {
         self.snr.last().map(|p| crate::dsp::decibel(*p))
@@ -362,6 +372,7 @@ impl Decoder {
 
     /// Soft bits of the current symbol, scaled by its signal-to-noise estimate.
     fn demap(&mut self) {
+        self.points_seq += 1;
         let (mut sp, mut np) = (0.0f32, 0.0f32);
         for &c in &self.cons {
             let hard = self.psk.nearest(c);

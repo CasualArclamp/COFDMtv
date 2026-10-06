@@ -116,10 +116,13 @@ pub struct ModemDecoder {
     perm: Vec<f32>,
     snr: Vec<f32>,
     codeword: Option<ModemCodeword>,
-    /// The last symbol's demodulated data tones (for a constellation display), and their
-    /// modulation.
+    /// The last payload symbol's demodulated data tones (for a constellation display; the
+    /// meta symbols' BPSK is left out), and their modulation.
     pub points: Vec<Cplx>,
     points_modulation: Option<Modulation>,
+    /// Payload symbols demodulated so far: a display collecting [`Self::points`] takes them
+    /// when this changes.
+    points_seq: u64,
 }
 
 impl ModemDecoder {
@@ -168,6 +171,7 @@ impl ModemDecoder {
             codeword: None,
             points: Vec::new(),
             points_modulation: None,
+            points_seq: 0,
         })
     }
 
@@ -214,6 +218,11 @@ impl ModemDecoder {
     /// The modulation of [`Self::points`].
     pub fn last_modulation(&self) -> Option<Modulation> {
         self.points_modulation
+    }
+
+    /// Counts the payload symbols demodulated, each of which replaces [`Self::points`].
+    pub fn points_seq(&self) -> u64 {
+        self.points_seq
     }
 
     pub fn last_snr_db(&self) -> Option<f32> {
@@ -381,14 +390,21 @@ impl ModemDecoder {
         let precision = sp / np;
         self.snr.push(precision);
         let precision = precision.min(1023.0);
-        self.points.clear();
-        self.points_modulation = Modulation::ALL.into_iter().find(|m| m.bits() == mod_bits);
+        // Symbol 0 is the meta symbol: its points are not the payload's.
+        let payload = j > 0;
+        if payload {
+            self.points.clear();
+            self.points_seq += 1;
+            self.points_modulation = Modulation::ALL.into_iter().find(|m| m.bits() == mod_bits);
+        }
         for i in 0..TONE_COUNT {
             if i % BLOCK_LENGTH != seed_off {
                 let bits = super::tone_bits(mod_bits, self.k);
                 super::demap_soft(&mut self.perm[self.k..self.k + bits], self.demod[i], precision, bits);
                 self.k += bits;
-                self.points.push(self.demod[i]);
+                if payload {
+                    self.points.push(self.demod[i]);
+                }
             }
         }
         // Keep the pilots for the channel update after this symbol.

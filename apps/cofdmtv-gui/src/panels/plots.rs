@@ -1,19 +1,31 @@
 //! Plot tabs: the input spectrum, its waterfall and the payload constellation.
 //!
 //! The plots are monitoring displays (DecDRM's): their axes are set from the data every
-//! frame and zooming/dragging is disabled; hovering shows the value under the cursor.
+//! frame and zooming/dragging is disabled; hovering shows the value under the cursor. The
+//! constellation builds up the last symbols' points as BinModem's symbol scope does.
 
 use super::{Palette, placeholder};
 use crate::receiver::RxSession;
 use crate::ring_image::RingImage;
 use crate::settings::{PlotTab, Span};
-use eframe::egui::{Color32, ComboBox, RichText, Ui};
+use eframe::egui::{self, Color32, ColorImage, ComboBox, RichText, TextureHandle, TextureId, TextureOptions, Ui};
+use std::sync::Arc;
 use egui_plot::{HLine, HoverPosition, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotImage, PlotPoint, PlotPoints, Points as Scatter, Span as PlotSpan, VLine};
 
-/// The waterfall's image on the GPU.
+/// The waterfall's and the constellation's images on the GPU.
 #[derive(Default)]
 pub struct PlotTextures {
     waterfall: RingImage,
+    constellation: Option<ConstellationImage>,
+}
+
+/// The constellation's build-up image, and what it was made from.
+struct ConstellationImage {
+    points: Arc<Vec<[f32; 2]>>,
+    texels: usize,
+    colour: Color32,
+    few: bool,
+    texture: TextureHandle,
 }
 
 /// Common settings of all plots.
@@ -127,14 +139,14 @@ pub fn show(ui: &mut Ui, tab: &mut PlotTab, span: &mut Span, rx: &RxSession, tex
                     ui.set_width((avail.x - side - 16.0).max(200.0));
                     waterfall_plot(ui, rx, &mut textures.waterfall, band, carrier, &pal, side, false);
                 });
-                constellation(ui, rx, &pal, side);
+                constellation(ui, rx, &pal, side, &mut textures.constellation);
             });
         }
         PlotTab::Spectrum => spectrum_plot(ui, "spectrum", "input spectrum", &spectrum, &pal, avail.y),
         PlotTab::Waterfall => waterfall_plot(ui, rx, &mut textures.waterfall, band, carrier, &pal, avail.y - 22.0, true),
         PlotTab::Constellation => {
             let side = (avail.x).min(avail.y - 40.0).max(120.0);
-            constellation(ui, rx, &pal, side);
+            constellation(ui, rx, &pal, side, &mut textures.constellation);
         }
     }
 }
@@ -180,19 +192,31 @@ fn waterfall_plot(ui: &mut Ui, rx: &RxSession, texture: &mut RingImage, band: Op
     }
 }
 
-/// The last payload symbol's constellation on a square plot, ideal points as crosses.
-fn constellation(ui: &mut Ui, rx: &RxSession, pal: &Palette, side: f32) {
+/// I and Q the constellation plot spans: ± this.
+const SPAN: f32 = 1.5;
+/// Most texels across the constellation's image (a bigger plot shows them larger).
+const MAX_TEXELS: usize = 1024;
+
+/// The payload's constellation on a square plot: the last symbols' points building up
+/// where they land (see [`build_up`]), the ideal points as crosses.
+fn constellation(ui: &mut Ui, rx: &RxSession, pal: &Palette, side: f32, image: &mut Option<ConstellationImage>) {
     let snap = &rx.snap;
     ui.vertical(|ui| {
-        let title = match (&snap.receiving, snap.constellation.len()) {
-            (_, 0) => "Payload".to_string(),
-            (Some(_), n) => format!("{} payload ({n} carriers)", snap.constellation_label),
-            (None, _) => format!("{} payload (last symbol)", snap.constellation_label),
-        };
-        ui.label(title);
-        let to_f64 = |p: &[f32; 2]| [f64::from(p[0]), f64::from(p[1])];
-        let ideal: Vec<[f64; 2]> = snap.ideal.iter().map(to_f64).collect();
-        let points: Vec<[f64; 2]> = snap.constellation.iter().map(to_f64).collect();
+        let n = snap.constellation_symbols;
+        if snap.constellation.is_empty() {
+            ui.label("Payload");
+        } else {
+            ui.label(format!("{} payload, last {n} symbol{}", snap.constellation_label, if n == 1 { "" } else { "s" })).on_hover_text(format!(
+                "{} points, each drawn faintly: where symbols keep landing, on the constellation's points, they build up",
+                snap.constellation.len()
+            ));
+        }
+        let texels = ((side * ui.ctx().pixels_per_point()).round() as usize).clamp(64, MAX_TEXELS);
+        // The modulations with ideal points to show have few points: larger squares.
+        let few = !snap.ideal.is_empty();
+        let texture = (!snap.constellation.is_empty()).then(|| refresh(ui.ctx(), image, &snap.constellation, texels, pal.points, few));
+        let ideal: Vec<[f64; 2]> = snap.ideal.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
+        let span = f64::from(SPAN);
         base_plot("constellation")
             .width(side)
             .height(side)
@@ -200,16 +224,104 @@ fn constellation(ui: &mut Ui, rx: &RxSession, pal: &Palette, side: f32) {
             .show_axes(false)
             .label_formatter(hover_label("I", 2, "Q", 2))
             .show(ui, |p| {
-                p.set_plot_bounds(PlotBounds::from_min_max([-1.5, -1.5], [1.5, 1.5]));
+                p.set_plot_bounds(PlotBounds::from_min_max([-span, -span], [span, span]));
                 p.hline(HLine::new("", 0.0).color(Color32::from_gray(128)).width(0.5));
                 p.vline(VLine::new("", 0.0).color(Color32::from_gray(128)).width(0.5));
-                if !points.is_empty() {
-                    p.points(Scatter::new("carriers", PlotPoints::new(points)).color(pal.points).radius(1.8));
+                // (egui_plot paints images first, under everything else.)
+                if let Some(id) = texture {
+                    p.image(PlotImage::new("points", id, PlotPoint::new(0.0, 0.0), [2.0 * SPAN, 2.0 * SPAN]));
                 }
                 if !ideal.is_empty() {
-                    p.points(Scatter::new("ideal", PlotPoints::new(ideal)).shape(MarkerShape::Plus).color(pal.ideal).radius(4.0));
+                    p.points(Scatter::new("ideal", PlotPoints::new(ideal)).shape(MarkerShape::Plus).color(pal.ideal.gamma_multiply(0.8)).radius(4.0));
                 }
             });
     });
+}
+
+/// The constellation's texture, made again when the points, the size or the colour
+/// changed (new points come with each payload symbol, a few times a second).
+fn refresh(ctx: &egui::Context, image: &mut Option<ConstellationImage>, points: &Arc<Vec<[f32; 2]>>, texels: usize, colour: Color32, few: bool) -> TextureId {
+    let current = image.as_ref().is_some_and(|i| Arc::ptr_eq(&i.points, points) && i.texels == texels && i.colour == colour && i.few == few);
+    if !current {
+        let pixels = build_up(points, texels, colour, few);
+        match image {
+            Some(i) => {
+                i.texture.set(pixels, TextureOptions::NEAREST);
+                (i.points, i.texels, i.colour, i.few) = (Arc::clone(points), texels, colour, few);
+            }
+            None => {
+                let texture = ctx.load_texture("constellation", pixels, TextureOptions::NEAREST);
+                *image = Some(ConstellationImage { points: Arc::clone(points), texels, colour, few, texture });
+            }
+        }
+    }
+    image.as_ref().map_or(TextureId::default(), |i| i.texture.id())
+}
+
+/// The points as BinModem's symbol scope draws them: each a small, faint square of one
+/// colour, so that where symbols keep landing — on the points of the constellation — they
+/// build up, `n` of them as opaque as `n` translucent layers, 1 − (1 − a)ⁿ, while noise
+/// stays faint. A modulation of `few` points (up to 64: PSK, QAM16, QAM64) gets larger,
+/// less faint squares, as BinModem's smaller constellations do (there the choice goes by
+/// the points kept; here every symbol brings hundreds, so it goes by the modulation), large
+/// enough to show around the ideal points' crosses. The image is `texels` square over
+/// ±[`SPAN`].
+fn build_up(points: &[[f32; 2]], texels: usize, colour: Color32, few: bool) -> ColorImage {
+    let alpha = if few { 150.0 / 255.0 } else { 110.0 / 255.0 };
+    let square = ((texels as f32 / 360.0).clamp(1.0, 2.5) * if few { 2.5 } else { 1.0 }).round().max(1.0) as i64;
+    let scale = texels as f32 / (2.0 * SPAN);
+    let n = texels as i64;
+    let mut hits = vec![0u16; texels * texels];
+    for &[x, y] in points {
+        if !(x.is_finite() && y.is_finite()) {
+            continue;
+        }
+        // The square's first texel, rows from the top.
+        let x0 = ((x + SPAN) * scale - square as f32 / 2.0).round() as i64;
+        let y0 = ((SPAN - y) * scale - square as f32 / 2.0).round() as i64;
+        for row in y0.max(0)..(y0 + square).min(n) {
+            for col in x0.max(0)..(x0 + square).min(n) {
+                let h = &mut hits[(row * n + col) as usize];
+                *h = h.saturating_add(1);
+            }
+        }
+    }
+    // Opacity of 0, 1, 2 … layers; beyond the table they are opaque.
+    let opacity: Vec<u8> = (0..64).map(|k| ((1.0 - (1.0f32 - alpha).powi(k)) * 255.0).round() as u8).collect();
+    let pixels = hits
+        .iter()
+        .map(|&k| match k {
+            0 => Color32::TRANSPARENT,
+            k => Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), opacity.get(usize::from(k)).copied().unwrap_or(255)),
+        })
+        .collect();
+    ColorImage::new([texels, texels], pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn points_build_up_where_they_land() {
+        let colour = Color32::from_rgb(90, 160, 255);
+        // A dozen symbols on one point of a crowded constellation, one stray point.
+        let mut points = vec![[0.5f32, 0.5]; 12];
+        points.extend(std::iter::repeat_n([-1.4, -1.4], 300));
+        points.push([-0.5, 0.25]);
+        points.push([f32::NAN, 0.0]);
+        points.push([9.0, 9.0]);
+        let img = build_up(&points, 300, colour, false);
+        let at = |x: f32, y: f32| img.pixels[((SPAN - y) * 100.0) as usize * 300 + ((x + SPAN) * 100.0) as usize];
+        let (one, twelve, many) = (at(-0.5, 0.25).a(), at(0.5, 0.5).a(), at(-1.4, -1.4).a());
+        assert!(one > 0 && one < 120, "a single point is faint: {one}");
+        assert!(twelve > 240, "a dozen build up: {twelve}");
+        assert_eq!(many, 255);
+        assert_eq!(at(1.0, -1.0), Color32::TRANSPARENT);
+        assert_eq!(img.pixels.iter().filter(|p| p.a() > 0).count(), 3, "one texel per point at this size, nothing for NaN or off the plot");
+        // The points of a small constellation are squares of three texels here.
+        let img = build_up(&[[0.5, 0.5]], 300, colour, true);
+        assert_eq!(img.pixels.iter().filter(|p| p.a() > 0).count(), 9);
+    }
 }
 
