@@ -6,7 +6,7 @@ members = ["crates/*", "apps/*"]
 default-members = ["apps/cofdmtv-gui"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/CasualArclamp/COFDMtv"
