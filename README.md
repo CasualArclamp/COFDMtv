@@ -1,5 +1,7 @@
 # COFDMtv
 
+If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
+
 A desktop transceiver, in Rust, for the audio modems Ahmet Inan builds at
 **[aicodix](https://www.aicodix.de)** ([github.com/aicodix](https://github.com/aicodix)),
 with the look of [DecDRM](https://github.com/CasualArclamp/DecDRM). It works with
